@@ -15,7 +15,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.9.2-secure.2"
+readonly SCRIPT_VERSION="Final v2.9.2-secure.3"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_commit="e741a4f56d368afbb9e5be3361b40c4552d3710d"
@@ -273,6 +273,7 @@ write_config() {
 execute_official_script() {
     local args="$1"
     local tmp_script
+    local -a cmd
     tmp_script=$(mktemp)
 
     if ! download_verified_official_script "$tmp_script"; then
@@ -280,13 +281,27 @@ execute_official_script() {
         return 1
     fi
 
-    if [[ "$args" = "remove" ]]; then
-        bash "$tmp_script" remove &> /dev/null &
-    elif [[ "$args" = "install-geodata" ]]; then
-        bash "$tmp_script" install-geodata &> /dev/null &
-    else
-        bash "$tmp_script" install &> /dev/null &
-    fi
+    case "$args" in
+        "install")
+            cmd=(install)
+            ;;
+        "install-geodata")
+            cmd=(install-geodata)
+            ;;
+        "remove")
+            cmd=(remove)
+            ;;
+        "remove --purge")
+            cmd=(remove --purge)
+            ;;
+        *)
+            error "未知官方安装脚本参数: $args"
+            rm -f "$tmp_script"
+            return 1
+            ;;
+    esac
+
+    bash "$tmp_script" "${cmd[@]}" &> /dev/null &
 
     spinner $!
     if ! wait $!; then
