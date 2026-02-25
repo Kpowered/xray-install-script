@@ -353,7 +353,7 @@ is_valid_domain() {
 
 prompt_for_vless_config() {
     local -n p_port="$1" p_uuid="$2" p_sni="$3"
-    local default_port="${4:-19000}"
+    local default_port="${4:-443}"
 
     while true; do
         read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
@@ -378,7 +378,7 @@ prompt_for_vless_config() {
 
 prompt_for_ss_config() {
     local -n p_port="$1" p_pass="$2"
-    local default_port="${3:-8388}"
+    local default_port="${3:-19000}"
 
     while true; do
         read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
@@ -479,7 +479,7 @@ add_ss_to_vless() {
     local vless_inbound vless_port default_ss_port ss_port ss_password ss_inbound
     vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     vless_port=$(echo "$vless_inbound" | jq -r '.port')
-    default_ss_port=$([[ "$vless_port" == "443" ]] && echo "8388" || echo "$((vless_port + 1))")
+    default_ss_port=$([[ "$vless_port" == "443" ]] && echo "19000" || echo "$((vless_port + 1))")
     
     prompt_for_ss_config ss_port ss_password "$default_ss_port"
 
@@ -501,7 +501,7 @@ add_vless_to_ss() {
     local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain key_pair private_key public_key vless_inbound
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     ss_port=$(echo "$ss_inbound" | jq -r '.port')
-    default_vless_port=$([[ "$ss_port" == "8388" ]] && echo "19000" || echo "$((ss_port - 1))")
+    default_vless_port=$([[ "$ss_port" == "19000" ]] && echo "443" || echo "$((ss_port - 1))")
 
     prompt_for_vless_config vless_port vless_uuid vless_domain "$default_vless_port"
 
@@ -545,7 +545,7 @@ install_dual() {
     
     local default_ss_port
     if [[ "$vless_port" == "443" ]]; then
-        default_ss_port=8388
+        default_ss_port=19000
     else
         default_ss_port=$((vless_port + 1))
     fi
@@ -970,12 +970,12 @@ non_interactive_usage() {
     --quiet            静默模式, <em>成功</em>后只输出订阅链接
 
   VLESS 选项:
-    --vless-port <p>   VLESS 端口 (默认: 19000)
+    --vless-port <p>   VLESS 端口 (默认: 443)
     --uuid <uuid>      UUID (默认: 随机生成)
     --sni <domain>     SNI 域名 (默认: learn.microsoft.com)
 
   Shadowsocks 选项:
-    --ss-port <p>      Shadowsocks 端口 (默认: 8388)
+    --ss-port <p>      Shadowsocks 端口 (默认: 19000)
     --ss-pass <pass>   Shadowsocks 密码 (默认: 随机生成)
 
   示例:
@@ -1011,7 +1011,7 @@ non_interactive_dispatcher() {
 
     case "$type" in
         vless)
-            [[ -z "$vless_port" ]] && vless_port=19000
+            [[ -z "$vless_port" ]] && vless_port=443
             [[ -z "$uuid" ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
             [[ -z "$sni" ]] && sni="learn.microsoft.com"
             if ! is_valid_port "$vless_port" || ! is_valid_domain "$sni"; then
@@ -1021,7 +1021,7 @@ non_interactive_dispatcher() {
             run_install_vless "$vless_port" "$uuid" "$sni"
             ;;
         ss)
-            [[ -z "$ss_port" ]] && ss_port=8388
+            [[ -z "$ss_port" ]] && ss_port=19000
             [[ -z "$ss_pass" ]] && ss_pass=$(generate_ss_key)
             if ! is_valid_port "$ss_port"; then
                 error "Shadowsocks 参数无效。请检查端口。" && non_interactive_usage && exit 1
@@ -1030,12 +1030,12 @@ non_interactive_dispatcher() {
             run_install_ss "$ss_port" "$ss_pass"
             ;;
         dual)
-            [[ -z "$vless_port" ]] && vless_port=19000
+            [[ -z "$vless_port" ]] && vless_port=443
             [[ -z "$uuid" ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
             [[ -z "$sni" ]] && sni="learn.microsoft.com"
             [[ -z "$ss_pass" ]] && ss_pass=$(generate_ss_key)
             if [[ -z "$ss_port" ]]; then
-                if [[ "$vless_port" == "443" ]]; then ss_port=8388; else ss_port=$((vless_port + 1)); fi
+                if [[ "$vless_port" == "443" ]]; then ss_port=19000; else ss_port=$((vless_port + 1)); fi
             fi
             if ! is_valid_port "$vless_port" || ! is_valid_domain "$sni" || ! is_valid_port "$ss_port"; then
                 error "双协议参数无效。请检查端口或SNI域名。" && non_interactive_usage && exit 1
