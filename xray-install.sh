@@ -11,7 +11,7 @@ set -Eeuo pipefail
 # =========================================================
 
 INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
-SCRIPT_VERSION="2026-02-25.8"
+SCRIPT_VERSION="2026-02-25.9"
 
 XRAY_DIR="/usr/local/etc/xray"
 LOG_DIR="/var/log/xray"
@@ -337,7 +337,7 @@ prompt_share_host() {
 
 install_prerequisites() {
   apt-get update -y
-  apt-get install -y curl wget jq openssl uuid-runtime qrencode python3 ca-certificates logrotate iproute2
+  apt-get install -y curl wget jq openssl uuid-runtime python3 ca-certificates logrotate iproute2
 }
 
 ensure_placeholder_config() {
@@ -739,8 +739,6 @@ build_share_links() {
       echo "${vless_link}"
       echo
     } >> "${OUT_DIR}/links.txt"
-
-    qrencode -o "${OUT_DIR}/vless.png" -s 8 -m 2 "${vless_link}"
   fi
 
   if (( ENABLE_SS == 1 )); then
@@ -754,36 +752,24 @@ build_share_links() {
       echo "${ss_link}"
       echo
     } >> "${OUT_DIR}/links.txt"
-
-    qrencode -o "${OUT_DIR}/ss2022.png" -s 8 -m 2 "${ss_link}"
   fi
 
   chmod 600 "${OUT_DIR}/links.txt"
 
   echo
   echo "Share links saved: ${OUT_DIR}/links.txt"
-  if (( ENABLE_VLESS == 1 )); then
-    echo "QR PNG: ${OUT_DIR}/vless.png"
-  fi
-  if (( ENABLE_SS == 1 )); then
-    echo "QR PNG: ${OUT_DIR}/ss2022.png"
-  fi
   echo "Client connect host/IP: ${server_ip}"
 
   if (( ENABLE_VLESS == 1 )); then
     echo
     echo "---------- VLESS LINK ----------"
     echo "${vless_link}"
-    echo "---------- VLESS QR ------------"
-    qrencode -t UTF8 "${vless_link}" || true
   fi
 
   if (( ENABLE_SS == 1 )); then
     echo
     echo "---------- SS2022 LINK ---------"
     echo "${ss_link}"
-    echo "---------- SS2022 QR -----------"
-    qrencode -t UTF8 "${ss_link}" || true
   fi
 }
 
