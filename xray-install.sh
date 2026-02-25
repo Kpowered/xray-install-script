@@ -11,7 +11,7 @@ set -Eeuo pipefail
 # =========================================================
 
 INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
-SCRIPT_VERSION="2026-02-25.4"
+SCRIPT_VERSION="2026-02-25.5"
 
 XRAY_DIR="/usr/local/etc/xray"
 LOG_DIR="/var/log/xray"
@@ -360,7 +360,9 @@ prepare_paths() {
 gen_unique() {
   local kind="$1"
   local val=""
-  while true; do
+  local attempt=0
+  while (( attempt < 200 )); do
+    attempt=$((attempt + 1))
     case "${kind}" in
       uuid)    val="$(uuidgen | tr 'A-Z' 'a-z')" ;;
       shortid) val="$(openssl rand -hex 8)" ;;
@@ -376,16 +378,40 @@ gen_unique() {
       return 0
     fi
   done
+  echo "Failed to generate unique ${kind} after many attempts."
+  exit 1
 }
 
 gen_unique_x25519() {
   local out=""
   local priv=""
   local pub=""
-  while true; do
-    out="$(/usr/local/bin/xray x25519)"
-    priv="$(echo "${out}" | awk '/Private key:/ {print $3}')"
-    pub="$(echo "${out}" | awk '/Public key:/ {print $3}')"
+  local attempt=0
+  local -a keys=()
+
+  for attempt in $(seq 1 12); do
+    out=""
+    priv=""
+    pub=""
+    keys=()
+
+    if command_exists timeout; then
+      out="$(timeout 8 /usr/local/bin/xray x25519 2>&1 || true)"
+    else
+      out="$(/usr/local/bin/xray x25519 2>&1 || true)"
+    fi
+
+    priv="$(printf '%s\n' "${out}" | sed -nE 's/.*Private key:[[:space:]]*([^[:space:]]+).*/\1/p' | head -n 1)"
+    pub="$(printf '%s\n' "${out}" | sed -nE 's/.*Public key:[[:space:]]*([^[:space:]]+).*/\1/p' | head -n 1)"
+
+    if [[ -z "${priv}" || -z "${pub}" ]]; then
+      mapfile -t keys < <(printf '%s\n' "${out}" | grep -Eo '[A-Za-z0-9_-]{40,}=?' | head -n 2 || true)
+      if (( ${#keys[@]} >= 2 )); then
+        priv="${keys[0]}"
+        pub="${keys[1]}"
+      fi
+    fi
+
     if [[ -n "${priv}" && -n "${pub}" ]] \
       && ! grep -Fxq "reality_priv:${priv}" "${STATE_FILE}" \
       && ! grep -Fxq "reality_pub:${pub}" "${STATE_FILE}"; then
@@ -394,7 +420,13 @@ gen_unique_x25519() {
       echo "${priv}|${pub}"
       return 0
     fi
+    sleep 0.2
   done
+
+  echo "Failed to generate REALITY x25519 key pair."
+  echo "Last xray x25519 output:"
+  printf '%s\n' "${out}"
+  exit 1
 }
 
 generate_credentials() {
