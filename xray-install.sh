@@ -233,21 +233,67 @@ prompt_ssh_port() {
   done
 }
 
+pick_random_reality_site() {
+  local sites=(
+    "www.cloudflare.com"
+    "www.microsoft.com"
+    "www.apple.com"
+    "www.amazon.com"
+    "www.wikipedia.org"
+    "www.bing.com"
+    "www.github.com"
+    "www.adobe.com"
+  )
+  local idx=0
+  if command_exists shuf; then
+    idx="$(shuf -i 0-$((${#sites[@]} - 1)) -n 1)"
+  else
+    idx="$((RANDOM % ${#sites[@]}))"
+  fi
+  echo "${sites[idx]}"
+}
+
 prompt_vless_settings() {
-  while true; do
-    read -rp "REALITY serverNames (comma separated, e.g. www.microsoft.com,www.cloudflare.com): " REALITY_SERVERNAMES
-    if [[ -n "${REALITY_SERVERNAMES}" ]]; then
-      break
-    fi
-    echo "serverNames cannot be empty."
-  done
+  local mode=""
+  local auto_site=""
 
   while true; do
-    read -rp "REALITY dest (e.g. www.microsoft.com:443): " REALITY_DEST
-    if [[ -n "${REALITY_DEST}" ]]; then
-      break
-    fi
-    echo "dest cannot be empty."
+    echo
+    echo "REALITY target mode:"
+    echo "1) Auto random popular website (recommended)"
+    echo "2) Manual input"
+    read -rp "Select [1/2] (default 1): " mode
+    mode="${mode:-1}"
+    case "${mode}" in
+      1)
+        auto_site="$(pick_random_reality_site)"
+        REALITY_SERVERNAMES="${auto_site}"
+        REALITY_DEST="${auto_site}:443"
+        echo "Auto selected site: ${auto_site}"
+        break
+        ;;
+      2)
+        while true; do
+          read -rp "REALITY serverNames (comma separated, e.g. www.microsoft.com,www.cloudflare.com): " REALITY_SERVERNAMES
+          if [[ -n "${REALITY_SERVERNAMES}" ]]; then
+            break
+          fi
+          echo "serverNames cannot be empty."
+        done
+
+        while true; do
+          read -rp "REALITY dest (e.g. www.microsoft.com:443): " REALITY_DEST
+          if [[ -n "${REALITY_DEST}" ]]; then
+            break
+          fi
+          echo "dest cannot be empty."
+        done
+        break
+        ;;
+      *)
+        echo "Invalid selection."
+        ;;
+    esac
   done
 
   read -rp "Optional: restrict VLESS source CIDR (empty = any): " VLESS_ALLOW_CIDR
@@ -259,10 +305,17 @@ install_prerequisites() {
 }
 
 install_official_xray() {
+  local rc=0
+  set +e
   bash -c "$(curl -fsSL "${INSTALLER_URL}")" @ install
+  rc=$?
+  set -e
   if [[ ! -x /usr/local/bin/xray ]]; then
     echo "Xray binary not found at /usr/local/bin/xray after install."
     exit 1
+  fi
+  if (( rc != 0 )); then
+    echo "Warning: official installer returned non-zero (${rc}), continuing with custom config setup."
   fi
 }
 
@@ -603,6 +656,22 @@ build_share_links() {
   fi
   if (( ENABLE_SS == 1 )); then
     echo "QR PNG: ${OUT_DIR}/ss2022.png"
+  fi
+
+  if (( ENABLE_VLESS == 1 )); then
+    echo
+    echo "---------- VLESS LINK ----------"
+    echo "${vless_link}"
+    echo "---------- VLESS QR ------------"
+    qrencode -t UTF8 "${vless_link}" || true
+  fi
+
+  if (( ENABLE_SS == 1 )); then
+    echo
+    echo "---------- SS2022 LINK ---------"
+    echo "${ss_link}"
+    echo "---------- SS2022 QR -----------"
+    qrencode -t UTF8 "${ss_link}" || true
   fi
 }
 

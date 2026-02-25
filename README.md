@@ -25,10 +25,17 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Kpowered/xray-install-script
 - Port choice during install:
   - Random high port (`20000-59999`)
   - Custom port
+- REALITY target choice:
+  - Auto random popular website (default)
+  - Manual `serverNames` + `dest`
 - Post-install checks:
   - `xray -test` config validation
   - `systemctl is-active xray`
   - Port listening checks (TCP/UDP)
+- Share output:
+  - Prints VLESS/SS links in terminal
+  - Prints terminal QR
+  - Saves QR PNG and links file to `/root/xray-share`
 - Re-run status view:
   - Service active/enabled
   - Current inbound protocols and ports
