@@ -304,6 +304,19 @@ install_prerequisites() {
   apt-get install -y curl wget jq openssl uuid-runtime ufw qrencode python3 ca-certificates logrotate iproute2
 }
 
+ensure_placeholder_config() {
+  mkdir -p "${XRAY_DIR}"
+  if [[ ! -s "${XRAY_DIR}/config.json" ]]; then
+    cat >"${XRAY_DIR}/config.json" <<'EOF'
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [],
+  "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
+}
+EOF
+  fi
+}
+
 install_official_xray() {
   local rc=0
   set +e
@@ -317,6 +330,7 @@ install_official_xray() {
   if (( rc != 0 )); then
     echo "Warning: official installer returned non-zero (${rc}), continuing with custom config setup."
   fi
+  systemctl stop xray >/dev/null 2>&1 || true
 }
 
 prepare_paths() {
@@ -475,6 +489,11 @@ build_xray_config() {
     | .inbounds += (if $vless == null then [] else [$vless] end)
     | .inbounds += (if $ss == null then [] else [$ss] end)
     ' > "${XRAY_DIR}/config.json"
+
+  if [[ ! -s "${XRAY_DIR}/config.json" ]]; then
+    echo "Failed to generate ${XRAY_DIR}/config.json"
+    exit 1
+  fi
 }
 
 configure_firewall() {
@@ -826,6 +845,8 @@ run_install() {
   echo "- SSH port: ${SSH_PORT}"
   if (( ENABLE_VLESS == 1 )); then
     echo "- VLESS+REALITY: enabled on tcp/${VLESS_PORT}"
+    echo "- REALITY serverNames: ${REALITY_SERVERNAMES}"
+    echo "- REALITY dest: ${REALITY_DEST}"
   else
     echo "- VLESS+REALITY: disabled"
   fi
@@ -843,6 +864,8 @@ run_install() {
 
   require_apt
   install_prerequisites
+  prepare_paths
+  ensure_placeholder_config
   install_official_xray
   prepare_paths
   generate_credentials

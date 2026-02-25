@@ -36,6 +36,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Kpowered/xray-install-script
   - Prints VLESS/SS links in terminal
   - Prints terminal QR
   - Saves QR PNG and links file to `/root/xray-share`
+- Installer robustness:
+  - Writes a temporary minimal config before official install
+  - Continues setup even if official installer returns a warning
 - Re-run status view:
   - Service active/enabled
   - Current inbound protocols and ports
