@@ -15,7 +15,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.9.2-secure.3"
+readonly SCRIPT_VERSION="Final v2.9.2-secure.4"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_commit="e741a4f56d368afbb9e5be3361b40c4552d3710d"
@@ -590,28 +590,38 @@ uninstall_xray() {
     rm -f ~/xray_subscription_info.txt
 
     # 卸载后自检：确认 binary / config / service 已清理
-    local -a remain_items=()
+    local remain_count=0
+    local remain_report=""
     local service_load_state=""
 
-    [[ -e "$xray_binary_path" ]] && remain_items+=("binary: $xray_binary_path")
-    [[ -e "$xray_config_path" ]] && remain_items+=("config: $xray_config_path")
+    if [[ -e "$xray_binary_path" ]]; then
+        remain_count=$((remain_count + 1))
+        remain_report="${remain_report}\n - binary: $xray_binary_path"
+    fi
+
+    if [[ -e "$xray_config_path" ]]; then
+        remain_count=$((remain_count + 1))
+        remain_report="${remain_report}\n - config: $xray_config_path"
+    fi
 
     service_load_state="$(systemctl show -p LoadState --value xray 2>/dev/null || echo unknown)"
     if [[ "$service_load_state" != "not-found" ]]; then
-        remain_items+=("service: xray (LoadState=${service_load_state})")
+        remain_count=$((remain_count + 1))
+        remain_report="${remain_report}\n - service: xray (LoadState=${service_load_state})"
     fi
 
     for svc_path in /etc/systemd/system/xray.service /etc/systemd/system/xray@.service /lib/systemd/system/xray.service /lib/systemd/system/xray@.service /usr/lib/systemd/system/xray.service /usr/lib/systemd/system/xray@.service; do
-        [[ -e "$svc_path" ]] && remain_items+=("service-file: $svc_path")
+        if [[ -e "$svc_path" ]]; then
+            remain_count=$((remain_count + 1))
+            remain_report="${remain_report}\n - service-file: $svc_path"
+        fi
     done
 
-    if [[ ${#remain_items[@]} -eq 0 ]]; then
+    if [[ "$remain_count" -eq 0 ]]; then
         success "Xray 已成功卸载。卸载自检通过：binary/config/service 均已清理。"
     else
         warning "Xray 卸载完成，但自检发现残留项："
-        for item in "${remain_items[@]}"; do
-            echo " - $item"
-        done
+        printf "%b\n" "$remain_report"
     fi
 }
 
