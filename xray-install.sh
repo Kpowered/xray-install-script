@@ -11,6 +11,7 @@ set -euo pipefail
 # =========================================================
 
 INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
+SCRIPT_VERSION="2026-02-25.3"
 
 XRAY_DIR="/usr/local/etc/xray"
 LOG_DIR="/var/log/xray"
@@ -47,6 +48,7 @@ print_header() {
 Xray Interactive Installer
 =========================================================
 EOF
+  echo "Script version: ${SCRIPT_VERSION}"
 }
 
 command_exists() {
@@ -891,6 +893,9 @@ quick_status_banner() {
   echo
   if [[ -x /usr/local/bin/xray ]]; then
     echo "Current server state: Xray installed, service=$(systemctl is-active xray 2>/dev/null || echo unknown)"
+    if [[ ! -f "${XRAY_DIR}/config.json" ]]; then
+      echo "Warning: ${XRAY_DIR}/config.json is missing. Choose [1] Install / Reinstall to recover."
+    fi
   else
     echo "Current server state: Xray not installed"
   fi
