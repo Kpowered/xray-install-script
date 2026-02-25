@@ -590,8 +590,8 @@ uninstall_xray() {
     rm -f ~/xray_subscription_info.txt
 
     # 卸载后自检：确认 binary / config / service 已清理
-    local -a remain_items
-    local service_load_state
+    local -a remain_items=()
+    local service_load_state=""
 
     [[ -e "$xray_binary_path" ]] && remain_items+=("binary: $xray_binary_path")
     [[ -e "$xray_config_path" ]] && remain_items+=("config: $xray_config_path")
