@@ -11,7 +11,7 @@ set -Eeuo pipefail
 # =========================================================
 
 INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
-SCRIPT_VERSION="2026-02-25.5"
+SCRIPT_VERSION="2026-02-25.6"
 
 XRAY_DIR="/usr/local/etc/xray"
 LOG_DIR="/var/log/xray"
@@ -70,6 +70,20 @@ require_apt() {
     echo "This script currently supports Debian/Ubuntu (apt-get required)."
     exit 1
   fi
+}
+
+b64url_no_pad() {
+  base64 -w 0 | tr '+/' '-_' | tr -d '='
+}
+
+random_hex_bytes() {
+  local n="${1:-8}"
+  od -An -N"${n}" -tx1 /dev/urandom | tr -d ' \n'
+}
+
+random_b64_bytes() {
+  local n="${1:-32}"
+  head -c "${n}" /dev/urandom | base64 -w 0
 }
 
 is_valid_port() {
@@ -364,9 +378,19 @@ gen_unique() {
   while (( attempt < 200 )); do
     attempt=$((attempt + 1))
     case "${kind}" in
-      uuid)    val="$(uuidgen | tr 'A-Z' 'a-z')" ;;
-      shortid) val="$(openssl rand -hex 8)" ;;
-      sspass)  val="$(openssl rand -base64 32 | tr -d '\n')" ;;
+      uuid)
+        if [[ -r /proc/sys/kernel/random/uuid ]]; then
+          val="$(tr 'A-Z' 'a-z' < /proc/sys/kernel/random/uuid)"
+        else
+          val="$(uuidgen | tr 'A-Z' 'a-z')"
+        fi
+        ;;
+      shortid)
+        val="$(random_hex_bytes 8)"
+        ;;
+      sspass)
+        val="$(random_b64_bytes 32 | tr -d '\n')"
+        ;;
       *)
         echo "Unknown token kind: ${kind}"
         exit 1
@@ -387,13 +411,15 @@ gen_unique_x25519() {
   local priv=""
   local pub=""
   local attempt=0
+  local key_file=""
   local -a keys=()
 
-  for attempt in $(seq 1 12); do
+  for attempt in $(seq 1 8); do
     out=""
     priv=""
     pub=""
     keys=()
+    echo "  - generating REALITY keypair (attempt ${attempt}/8)..." >&2
 
     if command_exists timeout; then
       out="$(timeout 8 /usr/local/bin/xray x25519 2>&1 || true)"
@@ -423,6 +449,26 @@ gen_unique_x25519() {
     sleep 0.2
   done
 
+  # Fallback: derive X25519 keypair via openssl and convert to base64url.
+  if command_exists openssl; then
+    echo "  - xray x25519 did not return usable output, trying openssl fallback..." >&2
+    key_file="$(mktemp)"
+    if openssl genpkey -algorithm X25519 -out "${key_file}" >/dev/null 2>&1; then
+      priv="$(openssl pkey -in "${key_file}" -outform DER 2>/dev/null | tail -c 32 | b64url_no_pad)"
+      pub="$(openssl pkey -in "${key_file}" -pubout -outform DER 2>/dev/null | tail -c 32 | b64url_no_pad)"
+    fi
+    rm -f "${key_file}" || true
+
+    if [[ -n "${priv}" && -n "${pub}" ]] \
+      && ! grep -Fxq "reality_priv:${priv}" "${STATE_FILE}" \
+      && ! grep -Fxq "reality_pub:${pub}" "${STATE_FILE}"; then
+      echo "reality_priv:${priv}" >> "${STATE_FILE}"
+      echo "reality_pub:${pub}" >> "${STATE_FILE}"
+      echo "${priv}|${pub}"
+      return 0
+    fi
+  fi
+
   echo "Failed to generate REALITY x25519 key pair."
   echo "Last xray x25519 output:"
   printf '%s\n' "${out}"
@@ -432,7 +478,9 @@ gen_unique_x25519() {
 generate_credentials() {
   if (( ENABLE_VLESS == 1 )); then
     local key_pair=""
+    echo "  - generating VLESS UUID..." >&2
     VLESS_UUID="$(gen_unique uuid)"
+    echo "  - generating REALITY shortId..." >&2
     REALITY_SHORT_ID="$(gen_unique shortid)"
     key_pair="$(gen_unique_x25519)"
     REALITY_PRIVATE_KEY="${key_pair%%|*}"
@@ -440,6 +488,7 @@ generate_credentials() {
   fi
 
   if (( ENABLE_SS == 1 )); then
+    echo "  - generating SS2022 password..." >&2
     SS_PASSWORD_B64="$(gen_unique sspass)"
   fi
 }
