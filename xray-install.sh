@@ -124,10 +124,10 @@ prompt_port_mode() {
   local custom_port=""
   local random_port=""
   while true; do
-    echo
-    echo "${label} port mode:"
-    echo "1) Random high port (20000-59999)"
-    echo "2) Custom port"
+    echo >&2
+    echo "${label} port mode:" >&2
+    echo "1) Random high port (20000-59999)" >&2
+    echo "2) Custom port" >&2
     read -rp "Select [1/2] (default 1): " mode
     mode="${mode:-1}"
     case "${mode}" in
@@ -140,15 +140,15 @@ prompt_port_mode() {
       2)
         read -rp "Enter custom ${label} port: " custom_port
         if ! is_valid_port "${custom_port}"; then
-          echo "Invalid port."
+          echo "Invalid port." >&2
           continue
         fi
         if [[ "${custom_port}" == "${SSH_PORT}" ]]; then
-          echo "Port ${custom_port} conflicts with SSH port."
+          echo "Port ${custom_port} conflicts with SSH port." >&2
           continue
         fi
         if is_port_in_selected "${custom_port}"; then
-          echo "Port ${custom_port} already selected in this run."
+          echo "Port ${custom_port} already selected in this run." >&2
           continue
         fi
         if port_is_listening_any "${custom_port}"; then
@@ -162,7 +162,7 @@ prompt_port_mode() {
         return 0
         ;;
       *)
-        echo "Invalid selection."
+        echo "Invalid selection." >&2
         ;;
     esac
   done
