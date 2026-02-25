@@ -588,7 +588,31 @@ uninstall_xray() {
         return 1
     fi
     rm -f ~/xray_subscription_info.txt
-    success "Xray 已成功卸载。"
+
+    # 卸载后自检：确认 binary / config / service 已清理
+    local -a remain_items
+    local service_load_state
+
+    [[ -e "$xray_binary_path" ]] && remain_items+=("binary: $xray_binary_path")
+    [[ -e "$xray_config_path" ]] && remain_items+=("config: $xray_config_path")
+
+    service_load_state="$(systemctl show -p LoadState --value xray 2>/dev/null || echo unknown)"
+    if [[ "$service_load_state" != "not-found" ]]; then
+        remain_items+=("service: xray (LoadState=${service_load_state})")
+    fi
+
+    for svc_path in /etc/systemd/system/xray.service /etc/systemd/system/xray@.service /lib/systemd/system/xray.service /lib/systemd/system/xray@.service /usr/lib/systemd/system/xray.service /usr/lib/systemd/system/xray@.service; do
+        [[ -e "$svc_path" ]] && remain_items+=("service-file: $svc_path")
+    done
+
+    if [[ ${#remain_items[@]} -eq 0 ]]; then
+        success "Xray 已成功卸载。卸载自检通过：binary/config/service 均已清理。"
+    else
+        warning "Xray 卸载完成，但自检发现残留项："
+        for item in "${remain_items[@]}"; do
+            echo " - $item"
+        done
+    fi
 }
 
 modify_config_menu() {
