@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # =========================================================
 # Xray Interactive Installer (Hardened)
@@ -11,7 +11,7 @@ set -euo pipefail
 # =========================================================
 
 INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
-SCRIPT_VERSION="2026-02-25.3"
+SCRIPT_VERSION="2026-02-25.4"
 
 XRAY_DIR="/usr/local/etc/xray"
 LOG_DIR="/var/log/xray"
@@ -34,6 +34,16 @@ REALITY_PRIVATE_KEY=""
 REALITY_PUBLIC_KEY=""
 SS_PASSWORD_B64=""
 SELECTED_PORTS=()
+
+on_error() {
+  local line_no="$1"
+  local cmd="$2"
+  local code="$3"
+  echo
+  echo "[ERROR] line ${line_no}: ${cmd} (exit=${code})"
+}
+
+trap 'on_error "${LINENO}" "${BASH_COMMAND}" "$?"' ERR
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Please run as root: sudo bash xray-install.sh"
@@ -322,7 +332,11 @@ EOF
 install_official_xray() {
   local rc=0
   set +e
-  bash -c "$(curl -fsSL "${INSTALLER_URL}")" @ install
+  if command_exists timeout; then
+    timeout 300 bash -c "$(curl -fsSL "${INSTALLER_URL}")" @ install
+  else
+    bash -c "$(curl -fsSL "${INSTALLER_URL}")" @ install
+  fi
   rc=$?
   set -e
   if [[ ! -x /usr/local/bin/xray ]]; then
@@ -865,18 +879,29 @@ run_install() {
   fi
 
   require_apt
+  echo "[1/11] Installing prerequisites..."
   install_prerequisites
+  echo "[2/11] Preparing work directories..."
   prepare_paths
+  echo "[3/11] Writing placeholder config..."
   ensure_placeholder_config
+  echo "[4/11] Installing official Xray..."
   install_official_xray
+  echo "[5/11] Preparing work directories (post-install)..."
   prepare_paths
+  echo "[6/11] Generating credentials..."
   generate_credentials
+  echo "[7/11] Writing final Xray config..."
   build_xray_config
+  echo "[8/11] Applying firewall rules..."
   configure_firewall
+  echo "[9/11] Applying systemd hardening and logrotate..."
   write_systemd_override
   write_logrotate
+  echo "[10/11] Saving install metadata and generating links..."
   save_meta
   build_share_links
+  echo "[11/11] Running health checks..."
 
   if check_installation_health; then
     echo
