@@ -10,8 +10,10 @@ set -Eeuo pipefail
 # - Post-install health checks (config, service, listening ports)
 # =========================================================
 
-INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
-SCRIPT_VERSION="2026-02-25.10"
+INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
+INSTALLER_SHA256="7F70C95F6B418DA8B4F4883343D602964915E28748993870FD554383AFDBE555"
+INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${INSTALLER_COMMIT}/install-release.sh"
+SCRIPT_VERSION="2026-02-25.11"
 
 XRAY_DIR="/usr/local/etc/xray"
 LOG_DIR="/var/log/xray"
@@ -32,6 +34,7 @@ REALITY_PRIVATE_KEY=""
 REALITY_PUBLIC_KEY=""
 SS_PASSWORD_B64=""
 SHARE_HOST=""
+PRINT_LINKS_ON_SCREEN=0
 SELECTED_PORTS=()
 
 on_error() {
@@ -69,6 +72,49 @@ require_apt() {
     echo "This script currently supports Debian/Ubuntu (apt-get required)."
     exit 1
   fi
+}
+
+calc_sha256() {
+  local file="$1"
+  if command_exists sha256sum; then
+    sha256sum "${file}" | awk '{print $1}'
+    return 0
+  fi
+  if command_exists shasum; then
+    shasum -a 256 "${file}" | awk '{print $1}'
+    return 0
+  fi
+  if command_exists openssl; then
+    openssl dgst -sha256 "${file}" | awk '{print $NF}'
+    return 0
+  fi
+  return 1
+}
+
+download_verified_installer() {
+  local target_file="$1"
+  local expected_sha=""
+  local actual_sha=""
+
+  curl -fsSL --proto '=https' --tlsv1.2 "${INSTALLER_URL}" -o "${target_file}"
+  if [[ ! -s "${target_file}" ]]; then
+    echo "Failed to download official installer script."
+    return 1
+  fi
+
+  expected_sha="$(printf '%s' "${INSTALLER_SHA256}" | tr 'A-Z' 'a-z')"
+  actual_sha="$(calc_sha256 "${target_file}" | tr 'A-Z' 'a-z' || true)"
+  if [[ -z "${actual_sha}" ]]; then
+    echo "Failed to calculate installer SHA256."
+    return 1
+  fi
+  if [[ "${actual_sha}" != "${expected_sha}" ]]; then
+    echo "Installer SHA256 mismatch."
+    echo "Expected: ${expected_sha}"
+    echo "Actual:   ${actual_sha}"
+    return 1
+  fi
+  chmod 700 "${target_file}"
 }
 
 b64url_no_pad() {
@@ -313,6 +359,16 @@ prompt_share_host() {
   read -rp "Client connect host/IP (empty = auto detect public IPv4): " SHARE_HOST
 }
 
+prompt_print_links_mode() {
+  local answer=""
+  read -rp "Print full share links in terminal? [y/N]: " answer
+  if [[ "${answer}" =~ ^[Yy]$ ]]; then
+    PRINT_LINKS_ON_SCREEN=1
+  else
+    PRINT_LINKS_ON_SCREEN=0
+  fi
+}
+
 install_prerequisites() {
   apt-get update -y
   apt-get install -y curl wget jq openssl uuid-runtime python3 ca-certificates logrotate iproute2
@@ -333,14 +389,18 @@ EOF
 
 install_official_xray() {
   local rc=0
+  local installer_file=""
+  installer_file="$(mktemp)"
+  download_verified_installer "${installer_file}"
   set +e
   if command_exists timeout; then
-    timeout 300 bash -c "$(curl -fsSL "${INSTALLER_URL}")" @ install
+    timeout 300 bash "${installer_file}" install
   else
-    bash -c "$(curl -fsSL "${INSTALLER_URL}")" @ install
+    bash "${installer_file}" install
   fi
   rc=$?
   set -e
+  rm -f "${installer_file}" || true
   if [[ ! -x /usr/local/bin/xray ]]; then
     echo "Xray binary not found at /usr/local/bin/xray after install."
     exit 1
@@ -579,6 +639,7 @@ build_xray_config() {
     echo "Failed to generate ${XRAY_DIR}/config.json"
     exit 1
   fi
+  chmod 600 "${XRAY_DIR}/config.json"
 }
 
 configure_firewall() {
@@ -738,16 +799,20 @@ build_share_links() {
   echo "Share links saved: ${OUT_DIR}/links.txt"
   echo "Client connect host/IP: ${server_ip}"
 
-  if (( ENABLE_VLESS == 1 )); then
-    echo
-    echo "---------- VLESS LINK ----------"
-    echo "${vless_link}"
-  fi
-
-  if (( ENABLE_SS == 1 )); then
-    echo
-    echo "---------- SS2022 LINK ---------"
-    echo "${ss_link}"
+  if (( PRINT_LINKS_ON_SCREEN == 1 )); then
+    if (( ENABLE_VLESS == 1 )); then
+      echo
+      echo "---------- VLESS LINK ----------"
+      echo "${vless_link}"
+    fi
+    if (( ENABLE_SS == 1 )); then
+      echo
+      echo "---------- SS2022 LINK ---------"
+      echo "${ss_link}"
+    fi
+  else
+    echo "Full links are hidden in terminal for security."
+    echo "Use this command if needed: cat ${OUT_DIR}/links.txt"
   fi
 }
 
@@ -854,7 +919,18 @@ run_uninstall() {
   systemctl disable xray >/dev/null 2>&1 || true
 
   if command_exists curl; then
-    bash -c "$(curl -fsSL "${INSTALLER_URL}")" @ remove || true
+    local installer_file=""
+    installer_file="$(mktemp)"
+    if download_verified_installer "${installer_file}"; then
+      set +e
+      if command_exists timeout; then
+        timeout 180 bash "${installer_file}" remove
+      else
+        bash "${installer_file}" remove
+      fi
+      set -e
+    fi
+    rm -f "${installer_file}" || true
   fi
 
   rm -f "${XRAY_DIR}/config.json" || true
@@ -896,6 +972,7 @@ run_install() {
   fi
 
   prompt_share_host
+  prompt_print_links_mode
 
   echo
   echo "Installation summary:"
@@ -918,6 +995,11 @@ run_install() {
     echo "- Client connect host/IP: ${SHARE_HOST}"
   else
     echo "- Client connect host/IP: auto detect"
+  fi
+  if (( PRINT_LINKS_ON_SCREEN == 1 )); then
+    echo "- Print links in terminal: yes"
+  else
+    echo "- Print links in terminal: no (recommended)"
   fi
   read -rp "Proceed with install/reconfigure? [Y/n]: " confirm
   confirm="${confirm:-Y}"

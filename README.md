@@ -38,11 +38,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Kpowered/xray-install-script
   - `systemctl is-active xray`
   - Port listening checks (TCP/UDP)
 - Share output:
-  - Prints VLESS/SS links in terminal
   - Saves links file to `/root/xray-share/links.txt`
+  - Terminal printing of full links is optional (default: hidden for security)
 - Installer robustness:
   - Writes a temporary minimal config before official install
   - Continues setup even if official installer returns a warning
+- Security hardening:
+  - Pins official installer to a fixed upstream commit
+  - Verifies installer SHA256 before execution
+  - Sets `/usr/local/etc/xray/config.json` to `600`
 - Re-run status view:
   - Service active/enabled
   - Current inbound protocols and ports
