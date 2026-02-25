@@ -25,6 +25,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Kpowered/xray-install-script
 - Port choice during install:
   - Random high port (`20000-59999`)
   - Custom port
+- Simpler install flow:
+  - No SSH port prompt
+  - No UFW/iptables changes
 - REALITY target choice:
   - Auto random popular website (default)
   - Manual `serverNames` + `dest`

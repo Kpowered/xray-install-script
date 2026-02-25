@@ -11,7 +11,7 @@ set -Eeuo pipefail
 # =========================================================
 
 INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
-SCRIPT_VERSION="2026-02-25.7"
+SCRIPT_VERSION="2026-02-25.8"
 
 XRAY_DIR="/usr/local/etc/xray"
 LOG_DIR="/var/log/xray"
@@ -22,12 +22,10 @@ OUT_DIR="/root/xray-share"
 
 ENABLE_VLESS=0
 ENABLE_SS=0
-SSH_PORT=22
 VLESS_PORT=""
 SS_PORT=""
 REALITY_SERVERNAMES=""
 REALITY_DEST=""
-VLESS_ALLOW_CIDR=""
 VLESS_UUID=""
 REALITY_SHORT_ID=""
 REALITY_PRIVATE_KEY=""
@@ -199,10 +197,6 @@ prompt_port_mode() {
           echo "Invalid port." >&2
           continue
         fi
-        if [[ "${custom_port}" == "${SSH_PORT}" ]]; then
-          echo "Port ${custom_port} conflicts with SSH port." >&2
-          continue
-        fi
         if is_port_in_selected "${custom_port}"; then
           echo "Port ${custom_port} already selected in this run." >&2
           continue
@@ -230,10 +224,6 @@ prompt_service_port() {
   local p=""
   while true; do
     p="$(prompt_port_mode "${label}")"
-    if [[ "${p}" == "${SSH_PORT}" ]]; then
-      echo "Port ${p} conflicts with SSH port."
-      continue
-    fi
     if is_port_in_selected "${p}"; then
       echo "Port ${p} already selected in this run."
       continue
@@ -273,19 +263,6 @@ prompt_install_profile() {
         echo "Invalid selection."
         ;;
     esac
-  done
-}
-
-prompt_ssh_port() {
-  local input_port=""
-  while true; do
-    read -rp "SSH port (default 22): " input_port
-    input_port="${input_port:-22}"
-    if is_valid_port "${input_port}"; then
-      SSH_PORT="${input_port}"
-      return 0
-    fi
-    echo "Invalid SSH port."
   done
 }
 
@@ -352,7 +329,6 @@ prompt_vless_settings() {
     esac
   done
 
-  read -rp "Optional: restrict VLESS source CIDR (empty = any): " VLESS_ALLOW_CIDR
 }
 
 prompt_share_host() {
@@ -361,7 +337,7 @@ prompt_share_host() {
 
 install_prerequisites() {
   apt-get update -y
-  apt-get install -y curl wget jq openssl uuid-runtime ufw qrencode python3 ca-certificates logrotate iproute2
+  apt-get install -y curl wget jq openssl uuid-runtime qrencode python3 ca-certificates logrotate iproute2
 }
 
 ensure_placeholder_config() {
@@ -628,28 +604,7 @@ build_xray_config() {
 }
 
 configure_firewall() {
-  ufw --force reset
-  ufw default deny incoming
-  ufw default allow outgoing
-  ufw allow "${SSH_PORT}/tcp"
-
-  if (( ENABLE_VLESS == 1 )); then
-    ufw allow "${VLESS_PORT}/tcp"
-  fi
-  if (( ENABLE_SS == 1 )); then
-    ufw allow "${SS_PORT}/tcp"
-    ufw allow "${SS_PORT}/udp"
-  fi
-  ufw --force enable
-
-  if (( ENABLE_VLESS == 1 )) && [[ -n "${VLESS_ALLOW_CIDR}" ]]; then
-    apt-get install -y iptables-persistent >/dev/null 2>&1 || true
-    iptables -C INPUT -p tcp --dport "${VLESS_PORT}" -s "${VLESS_ALLOW_CIDR}" -j ACCEPT 2>/dev/null \
-      || iptables -I INPUT -p tcp --dport "${VLESS_PORT}" -s "${VLESS_ALLOW_CIDR}" -j ACCEPT
-    iptables -C INPUT -p tcp --dport "${VLESS_PORT}" -j DROP 2>/dev/null \
-      || iptables -A INPUT -p tcp --dport "${VLESS_PORT}" -j DROP
-    netfilter-persistent save >/dev/null 2>&1 || true
-  fi
+  echo "Skipping firewall configuration (UFW/iptables disabled by design)."
 }
 
 write_systemd_override() {
@@ -846,22 +801,18 @@ save_meta() {
     --arg updatedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     --argjson enableVless "${ENABLE_VLESS}" \
     --argjson enableSs "${ENABLE_SS}" \
-    --argjson sshPort "${SSH_PORT}" \
     --argjson vlessPort "${vless_port_json}" \
     --argjson ssPort "${ss_port_json}" \
     --arg realityServerNames "${REALITY_SERVERNAMES:-}" \
     --arg realityDest "${REALITY_DEST:-}" \
-    --arg vlessAllowCidr "${VLESS_ALLOW_CIDR:-}" \
     '{
       updated_at: $updatedAt,
       enable_vless: $enableVless,
       enable_ss: $enableSs,
-      ssh_port: $sshPort,
       vless_port: $vlessPort,
       ss_port: $ssPort,
       reality_servernames: $realityServerNames,
-      reality_dest: $realityDest,
-      vless_allow_cidr: $vlessAllowCidr
+      reality_dest: $realityDest
     }' > "${META_FILE}"
   chmod 600 "${META_FILE}"
 }
@@ -913,7 +864,7 @@ show_status() {
 
   if [[ -f "${META_FILE}" ]]; then
     echo "Last install profile:"
-    jq -r '"  updated_at=\(.updated_at), enable_vless=\(.enable_vless), enable_ss=\(.enable_ss), ssh_port=\(.ssh_port)"' "${META_FILE}"
+    jq -r '"  updated_at=\(.updated_at), enable_vless=\(.enable_vless), enable_ss=\(.enable_ss), vless_port=\(.vless_port), ss_port=\(.ss_port)"' "${META_FILE}"
   fi
 
   if [[ -f "${OUT_DIR}/links.txt" ]]; then
@@ -949,7 +900,7 @@ run_uninstall() {
   rmdir /etc/systemd/system/xray.service.d >/dev/null 2>&1 || true
   systemctl daemon-reload || true
 
-  echo "Uninstall complete. UFW rules were left unchanged for safety."
+  echo "Uninstall complete."
   show_status
 }
 
@@ -958,17 +909,14 @@ run_install() {
 
   ENABLE_VLESS=0
   ENABLE_SS=0
-  SSH_PORT=22
   VLESS_PORT=""
   SS_PORT=""
   REALITY_SERVERNAMES=""
   REALITY_DEST=""
-  VLESS_ALLOW_CIDR=""
   SHARE_HOST=""
   SELECTED_PORTS=()
 
   prompt_install_profile
-  prompt_ssh_port
 
   if (( ENABLE_VLESS == 1 )); then
     prompt_service_port "VLESS+REALITY" VLESS_PORT
@@ -983,7 +931,6 @@ run_install() {
 
   echo
   echo "Installation summary:"
-  echo "- SSH port: ${SSH_PORT}"
   if (( ENABLE_VLESS == 1 )); then
     echo "- VLESS+REALITY: enabled on tcp/${VLESS_PORT}"
     echo "- REALITY serverNames: ${REALITY_SERVERNAMES}"
@@ -1023,7 +970,7 @@ run_install() {
   generate_credentials
   echo "[7/11] Writing final Xray config..."
   build_xray_config
-  echo "[8/11] Applying firewall rules..."
+  echo "[8/11] Skipping firewall changes..."
   configure_firewall
   echo "[9/11] Applying systemd hardening and logrotate..."
   write_systemd_override
