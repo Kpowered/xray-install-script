@@ -1,1087 +1,1011 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+#!/bin/bash
 
-# =========================================================
-# Xray Interactive Installer (Hardened)
-# - Official Xray install only (XTLS/Xray-install)
-# - Supports VLESS + REALITY and/or Shadowsocks 2022
-# - Interactive menu: install, status, uninstall
-# - Port strategy: random high port or custom
-# - Post-install health checks (config, service, listening ports)
-# =========================================================
+# ==============================================================================
+# Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
+# 版本: Final v2.9.2
+# 更新日志 (v2.9.2):
+# - [安全] 添加配置文件权限保护
+# - [安全] 增强脚本下载验证
+# - [安全] 敏感信息显示保护
+# - [稳定] 网络操作重试机制
+# - [稳定] 服务启动详细错误显示
+# ==============================================================================
 
-INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
-INSTALLER_SHA256="7F70C95F6B418DA8B4F4883343D602964915E28748993870FD554383AFDBE555"
-INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${INSTALLER_COMMIT}/install-release.sh"
-SCRIPT_VERSION="2026-02-25.11"
+# --- Shell 严格模式 ---
+set -euo pipefail
 
-XRAY_DIR="/usr/local/etc/xray"
-LOG_DIR="/var/log/xray"
-STATE_DIR="/var/lib/xray-installer"
-STATE_FILE="${STATE_DIR}/issued_tokens.txt"
-META_FILE="${STATE_DIR}/install_meta.json"
-OUT_DIR="/root/xray-share"
+# --- 全局常量 ---
+readonly SCRIPT_VERSION="Final v2.9.2-secure.2"
+readonly xray_config_path="/usr/local/etc/xray/config.json"
+readonly xray_binary_path="/usr/local/bin/xray"
+readonly xray_install_script_commit="e741a4f56d368afbb9e5be3361b40c4552d3710d"
+readonly xray_install_script_sha256="7F70C95F6B418DA8B4F4883343D602964915E28748993870FD554383AFDBE555"
+readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/${xray_install_script_commit}/install-release.sh"
 
-ENABLE_VLESS=0
-ENABLE_SS=0
-VLESS_PORT=""
-SS_PORT=""
-REALITY_SERVERNAMES=""
-REALITY_DEST=""
-VLESS_UUID=""
-REALITY_SHORT_ID=""
-REALITY_PRIVATE_KEY=""
-REALITY_PUBLIC_KEY=""
-SS_PASSWORD_B64=""
-SHARE_HOST=""
-PRINT_LINKS_ON_SCREEN=0
-SELECTED_PORTS=()
+# --- 颜色定义 ---
+readonly red='\e[91m' green='\e[92m' yellow='\e[93m'
+readonly magenta='\e[95m' cyan='\e[96m' none='\e[0m'
 
-on_error() {
-  local line_no="$1"
-  local cmd="$2"
-  local code="$3"
-  echo
-  echo "[ERROR] line ${line_no}: ${cmd} (exit=${code})"
+# --- 全局变量 ---
+xray_status_info=""
+is_quiet=false
+
+# --- 辅助函数 ---
+error() { 
+    echo -e "\n$red[✖] $1$none\n" >&2
+    
+    # 根据错误内容提供简单建议
+    case "$1" in
+        *"网络"*|*"下载"*) 
+            echo -e "$yellow提示: 检查网络连接或更换DNS$none" >&2 ;;
+        *"权限"*|*"root"*) 
+            echo -e "$yellow提示: 请使用 sudo 运行脚本$none" >&2 ;;
+        *"端口"*) 
+            echo -e "$yellow提示: 尝试使用其他端口号$none" >&2 ;;
+    esac
 }
 
-trap 'on_error "${LINENO}" "${BASH_COMMAND}" "$?"' ERR
-
-if [[ "${EUID}" -ne 0 ]]; then
-  echo "Please run as root: sudo bash xray-install.sh"
-  exit 1
-fi
-
-export DEBIAN_FRONTEND=noninteractive
-
-print_header() {
-  cat <<'EOF'
-=========================================================
-Xray Interactive Installer
-=========================================================
-EOF
-  echo "Script version: ${SCRIPT_VERSION}"
-}
-
-command_exists() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-require_apt() {
-  if ! command_exists apt-get; then
-    echo "This script currently supports Debian/Ubuntu (apt-get required)."
-    exit 1
-  fi
-}
+info() { [[ "$is_quiet" = false ]] && echo -e "\n$yellow[!] $1$none\n"; }
+success() { [[ "$is_quiet" = false ]] && echo -e "\n$green[✔] $1$none\n"; }
+warning() { [[ "$is_quiet" = false ]] && echo -e "\n$yellow[⚠] $1$none\n"; }
 
 calc_sha256() {
-  local file="$1"
-  if command_exists sha256sum; then
-    sha256sum "${file}" | awk '{print $1}'
-    return 0
-  fi
-  if command_exists shasum; then
-    shasum -a 256 "${file}" | awk '{print $1}'
-    return 0
-  fi
-  if command_exists openssl; then
-    openssl dgst -sha256 "${file}" | awk '{print $NF}'
-    return 0
-  fi
-  return 1
-}
-
-download_verified_installer() {
-  local target_file="$1"
-  local expected_sha=""
-  local actual_sha=""
-
-  curl -fsSL --proto '=https' --tlsv1.2 "${INSTALLER_URL}" -o "${target_file}"
-  if [[ ! -s "${target_file}" ]]; then
-    echo "Failed to download official installer script."
-    return 1
-  fi
-
-  expected_sha="$(printf '%s' "${INSTALLER_SHA256}" | tr 'A-Z' 'a-z')"
-  actual_sha="$(calc_sha256 "${target_file}" | tr 'A-Z' 'a-z' || true)"
-  if [[ -z "${actual_sha}" ]]; then
-    echo "Failed to calculate installer SHA256."
-    return 1
-  fi
-  if [[ "${actual_sha}" != "${expected_sha}" ]]; then
-    echo "Installer SHA256 mismatch."
-    echo "Expected: ${expected_sha}"
-    echo "Actual:   ${actual_sha}"
-    return 1
-  fi
-  chmod 700 "${target_file}"
-}
-
-b64url_no_pad() {
-  base64 -w 0 | tr '+/' '-_' | tr -d '='
-}
-
-random_hex_bytes() {
-  local n="${1:-8}"
-  od -An -N"${n}" -tx1 /dev/urandom | tr -d ' \n'
-}
-
-random_b64_bytes() {
-  local n="${1:-32}"
-  head -c "${n}" /dev/urandom | base64 -w 0
-}
-
-format_host_for_url() {
-  local host="$1"
-  if [[ "${host}" == *:* && "${host}" != \[*\] ]]; then
-    echo "[${host}]"
-  else
-    echo "${host}"
-  fi
-}
-
-detect_share_host() {
-  local host=""
-
-  host="$(curl -4 -fsSL --max-time 6 https://api.ipify.org 2>/dev/null || true)"
-  if [[ -z "${host}" ]]; then
-    host="$(curl -4 -fsSL --max-time 6 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\n' || true)"
-  fi
-  if [[ -z "${host}" ]]; then
-    host="$(hostname -I | awk '{for(i=1;i<=NF;i++) if ($i !~ /:/) {print $i; exit}}')"
-  fi
-  if [[ -z "${host}" ]]; then
-    host="$(curl -6 -fsSL --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
-  fi
-  if [[ -z "${host}" ]]; then
-    host="$(hostname -I | awk '{print $1}')"
-  fi
-
-  echo "${host}"
-}
-
-is_valid_port() {
-  local port="${1:-}"
-  [[ "${port}" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 ))
-}
-
-is_port_in_selected() {
-  local target="$1"
-  local p
-  for p in "${SELECTED_PORTS[@]:-}"; do
-    if [[ "${p}" == "${target}" ]]; then
-      return 0
+    local file="$1"
+    if command -v sha256sum &>/dev/null; then
+        sha256sum "$file" | awk '{print $1}'
+        return 0
     fi
-  done
-  return 1
-}
-
-port_is_listening_any() {
-  local port="$1"
-  if ! command_exists ss; then
+    if command -v shasum &>/dev/null; then
+        shasum -a 256 "$file" | awk '{print $1}'
+        return 0
+    fi
+    if command -v openssl &>/dev/null; then
+        openssl dgst -sha256 "$file" | awk '{print $NF}'
+        return 0
+    fi
     return 1
-  fi
-  ss -lntuH 2>/dev/null | awk '{print $5}' | grep -Eo '[0-9]+$' | grep -qx "${port}"
 }
 
-is_listening_tcp() {
-  local port="$1"
-  if ! command_exists ss; then
-    return 1
-  fi
-  ss -lntH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+download_verified_official_script() {
+    local target_file="$1"
+    local expected_sha actual_sha
+
+    if ! curl -fsSL --proto '=https' --tlsv1.2 "$xray_install_script_url" -o "$target_file"; then
+        error "下载 Xray 官方安装脚本失败，请检查网络。"
+        return 1
+    fi
+
+    if [[ ! -s "$target_file" ]]; then
+        error "官方安装脚本下载后为空。"
+        return 1
+    fi
+
+    expected_sha=$(echo "$xray_install_script_sha256" | tr 'A-Z' 'a-z')
+    actual_sha=$(calc_sha256 "$target_file" | tr 'A-Z' 'a-z' || true)
+    if [[ -z "$actual_sha" ]]; then
+        error "无法计算安装脚本 SHA256。"
+        return 1
+    fi
+    if [[ "$actual_sha" != "$expected_sha" ]]; then
+        error "安装脚本 SHA256 校验失败。"
+        warning "Expected: $expected_sha"
+        warning "Actual:   $actual_sha"
+        return 1
+    fi
+
+    chmod 700 "$target_file"
 }
 
-is_listening_udp() {
-  local port="$1"
-  if ! command_exists ss; then
-    return 1
-  fi
-  ss -lnuH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
-}
-
-pick_random_high_port() {
-  local candidate=""
-  local i
-  for i in $(seq 1 300); do
-    if command_exists shuf; then
-      candidate="$(shuf -i 20000-59999 -n 1)"
+generate_shortid() {
+    if command -v openssl &>/dev/null; then
+        openssl rand -hex 8
     else
-      candidate="$((RANDOM % 40000 + 20000))"
+        od -An -N8 -tx1 /dev/urandom | tr -d ' \n'
     fi
-    if ! is_port_in_selected "${candidate}" && ! port_is_listening_any "${candidate}"; then
-      echo "${candidate}"
-      return 0
+}
+
+generate_reality_keys() {
+    local key_pair private_key public_key
+    key_pair=$("$xray_binary_path" x25519 2>/dev/null || true)
+
+    private_key=$(echo "$key_pair" | sed -nE 's/.*Private[[:space:]]*[Kk]ey:?[[:space:]]*([^[:space:]]+).*/\1/p' | head -n 1)
+    public_key=$(echo "$key_pair" | sed -nE 's/.*Public[[:space:]]*[Kk]ey:?[[:space:]]*([^[:space:]]+).*/\1/p' | head -n 1)
+
+    if [[ -z "$private_key" || -z "$public_key" ]]; then
+        private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}' | head -n 1)
+        public_key=$(echo "$key_pair" | awk '/PublicKey:/ {print $2}' | head -n 1)
     fi
-  done
-  echo "Failed to allocate a random high port after many attempts."
-  exit 1
-}
 
-prompt_port_mode() {
-  local label="$1"
-  local mode=""
-  local custom_port=""
-  local random_port=""
-  while true; do
-    echo >&2
-    echo "${label} port mode:" >&2
-    echo "1) Random high port (20000-59999)" >&2
-    echo "2) Custom port" >&2
-    read -rp "Select [1/2] (default 1): " mode
-    mode="${mode:-1}"
-    case "${mode}" in
-      1)
-        random_port="$(pick_random_high_port)"
-        echo "Selected random port: ${random_port}" >&2
-        echo "${random_port}"
-        return 0
-        ;;
-      2)
-        read -rp "Enter custom ${label} port: " custom_port
-        if ! is_valid_port "${custom_port}"; then
-          echo "Invalid port." >&2
-          continue
-        fi
-        if is_port_in_selected "${custom_port}"; then
-          echo "Port ${custom_port} already selected in this run." >&2
-          continue
-        fi
-        if port_is_listening_any "${custom_port}"; then
-          local force_use="n"
-          read -rp "Port ${custom_port} appears in use. Continue anyway? [y/N]: " force_use
-          if [[ ! "${force_use}" =~ ^[Yy]$ ]]; then
-            continue
-          fi
-        fi
-        echo "${custom_port}"
-        return 0
-        ;;
-      *)
-        echo "Invalid selection." >&2
-        ;;
-    esac
-  done
-}
-
-prompt_service_port() {
-  local label="$1"
-  local out_var="$2"
-  local p=""
-  while true; do
-    p="$(prompt_port_mode "${label}")"
-    if is_port_in_selected "${p}"; then
-      echo "Port ${p} already selected in this run."
-      continue
+    if [[ -z "$private_key" || -z "$public_key" ]]; then
+        public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}' | head -n 1)
     fi
-    SELECTED_PORTS+=("${p}")
-    printf -v "${out_var}" '%s' "${p}"
-    return 0
-  done
+
+    if [[ -z "$private_key" || -z "$public_key" ]]; then
+        return 1
+    fi
+
+    echo "${private_key}|${public_key}"
 }
 
-prompt_install_profile() {
-  local choice=""
-  while true; do
-    echo
-    echo "Install type:"
-    echo "1) VLESS + REALITY only"
-    echo "2) Shadowsocks 2022 only"
-    echo "3) Both VLESS + REALITY and SS2022"
-    read -rp "Select [1/2/3]: " choice
-    case "${choice}" in
-      1)
-        ENABLE_VLESS=1
-        ENABLE_SS=0
-        return 0
-        ;;
-      2)
-        ENABLE_VLESS=0
-        ENABLE_SS=1
-        return 0
-        ;;
-      3)
-        ENABLE_VLESS=1
-        ENABLE_SS=1
-        return 0
-        ;;
-      *)
-        echo "Invalid selection."
-        ;;
-    esac
-  done
+spinner() {
+    local pid="$1"
+    local spinstr='|/-\'
+    if [[ "$is_quiet" = true ]]; then
+        wait "$pid"
+        return
+    fi
+    while ps -p "$pid" > /dev/null; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep 0.1
+        printf "\r"
+    done
+    printf "    \r"
 }
 
-prompt_vless_settings() {
-  local mode=""
-
-  while true; do
-    echo
-    echo "REALITY target mode:"
-    echo "1) Use stable default (recommended): www.cloudflare.com:443"
-    echo "2) Manual input"
-    read -rp "Select [1/2] (default 1): " mode
-    mode="${mode:-1}"
-    case "${mode}" in
-      1)
-        REALITY_SERVERNAMES="www.cloudflare.com"
-        REALITY_DEST="www.cloudflare.com:443"
-        echo "Selected default target: ${REALITY_DEST}"
-        break
-        ;;
-      2)
-        while true; do
-          read -rp "REALITY serverNames (comma separated, e.g. www.microsoft.com,www.cloudflare.com): " REALITY_SERVERNAMES
-          if [[ -n "${REALITY_SERVERNAMES}" ]]; then
-            break
-          fi
-          echo "serverNames cannot be empty."
+get_public_ip() {
+    local ip
+    local attempts=0
+    local max_attempts=2
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        for cmd in "curl -4s --max-time 5" "wget -4qO- --timeout=5"; do
+            for url in "https://api.ipify.org" "https://ip.sb" "https://checkip.amazonaws.com"; do
+                ip=$($cmd "$url" 2>/dev/null) && [[ -n "$ip" ]] && echo "$ip" && return
+            done
         done
-
-        while true; do
-          read -rp "REALITY dest (e.g. www.microsoft.com:443): " REALITY_DEST
-          if [[ -n "${REALITY_DEST}" ]]; then
-            break
-          fi
-          echo "dest cannot be empty."
+        ((attempts++))
+        [[ $attempts -lt $max_attempts ]] && sleep 1
+    done
+    
+    # IPv6 fallback
+    for cmd in "curl -6s --max-time 5" "wget -6qO- --timeout=5"; do
+        for url in "https://api64.ipify.org" "https://ip.sb"; do
+            ip=$($cmd "$url" 2>/dev/null) && [[ -n "$ip" ]] && echo "$ip" && return
         done
-        break
-        ;;
-      *)
-        echo "Invalid selection."
-        ;;
-    esac
-  done
-
+    done
 }
 
-prompt_share_host() {
-  read -rp "Client connect host/IP (empty = auto detect public IPv4): " SHARE_HOST
-}
-
-prompt_print_links_mode() {
-  local answer=""
-  read -rp "Print full share links in terminal? [y/N]: " answer
-  if [[ "${answer}" =~ ^[Yy]$ ]]; then
-    PRINT_LINKS_ON_SCREEN=1
-  else
-    PRINT_LINKS_ON_SCREEN=0
-  fi
-}
-
-install_prerequisites() {
-  apt-get update -y
-  apt-get install -y curl wget jq openssl uuid-runtime python3 ca-certificates logrotate iproute2
-}
-
-ensure_placeholder_config() {
-  mkdir -p "${XRAY_DIR}"
-  if [[ ! -s "${XRAY_DIR}/config.json" ]]; then
-    cat >"${XRAY_DIR}/config.json" <<'EOF'
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [],
-  "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
-}
-EOF
-  fi
-}
-
-install_official_xray() {
-  local rc=0
-  local installer_file=""
-  installer_file="$(mktemp)"
-  download_verified_installer "${installer_file}"
-  set +e
-  if command_exists timeout; then
-    timeout 300 bash "${installer_file}" install
-  else
-    bash "${installer_file}" install
-  fi
-  rc=$?
-  set -e
-  rm -f "${installer_file}" || true
-  if [[ ! -x /usr/local/bin/xray ]]; then
-    echo "Xray binary not found at /usr/local/bin/xray after install."
-    exit 1
-  fi
-  if (( rc != 0 )); then
-    echo "Warning: official installer returned non-zero (${rc}), continuing with custom config setup."
-  fi
-  systemctl stop xray >/dev/null 2>&1 || true
-}
-
-prepare_paths() {
-  mkdir -p "${XRAY_DIR}" "${LOG_DIR}" "${STATE_DIR}" "${OUT_DIR}"
-  touch "${STATE_FILE}"
-  chmod 700 "${STATE_DIR}" "${OUT_DIR}"
-  chmod 600 "${STATE_FILE}"
-  chown -R nobody:nogroup "${LOG_DIR}" 2>/dev/null || true
-}
-
-gen_unique() {
-  local kind="$1"
-  local val=""
-  local attempt=0
-  while (( attempt < 200 )); do
-    attempt=$((attempt + 1))
-    case "${kind}" in
-      uuid)
-        if [[ -r /proc/sys/kernel/random/uuid ]]; then
-          val="$(tr 'A-Z' 'a-z' < /proc/sys/kernel/random/uuid)"
-        else
-          val="$(uuidgen | tr 'A-Z' 'a-z')"
+# --- 预检查与环境设置 ---
+pre_check() {
+    [[ "$(id -u)" != 0 ]] && error "错误: 您必须以root用户身份运行此脚本" && exit 1
+    if [ ! -f /etc/debian_version ]; then error "错误: 此脚本仅支持 Debian/Ubuntu 及其衍生系统。" && exit 1; fi
+    if ! command -v jq &>/dev/null || ! command -v curl &>/dev/null; then
+        info "检测到缺失的依赖 (jq/curl)，正在尝试自动安装..."
+        (DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y jq curl) &> /dev/null &
+        spinner $!
+        if ! command -v jq &>/dev/null || ! command -v curl &>/dev/null; then
+            error "依赖 (jq/curl) 自动安装失败。请手动运行 'apt update && apt install -y jq curl' 后重试。"
+            exit 1
         fi
-        ;;
-      shortid)
-        val="$(random_hex_bytes 8)"
-        ;;
-      sspass)
-        val="$(random_b64_bytes 32 | tr -d '\n')"
-        ;;
-      *)
-        echo "Unknown token kind: ${kind}"
-        exit 1
-        ;;
-    esac
-    if ! grep -Fxq "${kind}:${val}" "${STATE_FILE}"; then
-      echo "${kind}:${val}" >> "${STATE_FILE}"
-      echo "${val}"
-      return 0
+        success "依赖已成功安装。"
     fi
-  done
-  echo "Failed to generate unique ${kind} after many attempts."
-  exit 1
 }
 
-gen_unique_x25519() {
-  local out=""
-  local priv=""
-  local pub=""
-  local attempt=0
-  local key_file=""
-  local -a keys=()
-
-  for attempt in $(seq 1 8); do
-    out=""
-    priv=""
-    pub=""
-    keys=()
-    echo "  - generating REALITY keypair (attempt ${attempt}/8)..." >&2
-
-    if command_exists timeout; then
-      out="$(timeout 8 /usr/local/bin/xray x25519 2>&1 || true)"
+check_xray_status() {
+    if [[ ! -f "$xray_binary_path" || ! -x "$xray_binary_path" ]]; then
+        xray_status_info=" Xray 状态: ${red}未安装${none}"
+        return
+    fi
+    local xray_version
+    xray_version=$("$xray_binary_path" version 2>/dev/null | head -n 1 | awk '{print $2}' || echo "未知")
+    local service_status
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        service_status="${green}运行中${none}"
     else
-      out="$(/usr/local/bin/xray x25519 2>&1 || true)"
+        service_status="${yellow}未运行${none}"
     fi
-
-    priv="$(printf '%s\n' "${out}" | sed -nE 's/.*Private key:[[:space:]]*([^[:space:]]+).*/\1/p' | head -n 1)"
-    pub="$(printf '%s\n' "${out}" | sed -nE 's/.*Public key:[[:space:]]*([^[:space:]]+).*/\1/p' | head -n 1)"
-
-    if [[ -z "${priv}" || -z "${pub}" ]]; then
-      mapfile -t keys < <(printf '%s\n' "${out}" | grep -Eo '[A-Za-z0-9_-]{40,}=?' | head -n 2 || true)
-      if (( ${#keys[@]} >= 2 )); then
-        priv="${keys[0]}"
-        pub="${keys[1]}"
-      fi
-    fi
-
-    if [[ -n "${priv}" && -n "${pub}" ]] \
-      && ! grep -Fxq "reality_priv:${priv}" "${STATE_FILE}" \
-      && ! grep -Fxq "reality_pub:${pub}" "${STATE_FILE}"; then
-      echo "reality_priv:${priv}" >> "${STATE_FILE}"
-      echo "reality_pub:${pub}" >> "${STATE_FILE}"
-      echo "${priv}|${pub}"
-      return 0
-    fi
-    sleep 0.2
-  done
-
-  # Fallback: derive X25519 keypair via openssl and convert to base64url.
-  if command_exists openssl; then
-    echo "  - xray x25519 did not return usable output, trying openssl fallback..." >&2
-    key_file="$(mktemp)"
-    if openssl genpkey -algorithm X25519 -out "${key_file}" >/dev/null 2>&1; then
-      priv="$(openssl pkey -in "${key_file}" -outform DER 2>/dev/null | tail -c 32 | b64url_no_pad)"
-      pub="$(openssl pkey -in "${key_file}" -pubout -outform DER 2>/dev/null | tail -c 32 | b64url_no_pad)"
-    fi
-    rm -f "${key_file}" || true
-
-    if [[ -n "${priv}" && -n "${pub}" ]] \
-      && ! grep -Fxq "reality_priv:${priv}" "${STATE_FILE}" \
-      && ! grep -Fxq "reality_pub:${pub}" "${STATE_FILE}"; then
-      echo "reality_priv:${priv}" >> "${STATE_FILE}"
-      echo "reality_pub:${pub}" >> "${STATE_FILE}"
-      echo "${priv}|${pub}"
-      return 0
-    fi
-  fi
-
-  echo "Failed to generate REALITY x25519 key pair."
-  echo "Last xray x25519 output:"
-  printf '%s\n' "${out}"
-  exit 1
+    xray_status_info=" Xray 状态: ${green}已安装${none} | ${service_status} | 版本: ${cyan}${xray_version}${none}"
 }
 
-generate_credentials() {
-  if (( ENABLE_VLESS == 1 )); then
-    local key_pair=""
-    echo "  - generating VLESS UUID..." >&2
-    VLESS_UUID="$(gen_unique uuid)"
-    echo "  - generating REALITY shortId..." >&2
-    REALITY_SHORT_ID="$(gen_unique shortid)"
-    key_pair="$(gen_unique_x25519)"
-    REALITY_PRIVATE_KEY="${key_pair%%|*}"
-    REALITY_PUBLIC_KEY="${key_pair##*|}"
-  fi
-
-  if (( ENABLE_SS == 1 )); then
-    echo "  - generating SS2022 password..." >&2
-    SS_PASSWORD_B64="$(gen_unique sspass)"
-  fi
-}
-
-build_servernames_json() {
-  printf '%s' "${REALITY_SERVERNAMES}" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))'
-}
-
-build_xray_config() {
-  local vless_json="null"
-  local ss_json="null"
-
-  if (( ENABLE_VLESS == 1 )); then
-    local servernames_json
-    servernames_json="$(build_servernames_json)"
-    if [[ "${servernames_json}" == "[]" ]]; then
-      echo "REALITY serverNames is empty after parsing."
-      exit 1
+# 新增：快速状态检查
+quick_status() {
+    if [[ ! -f "$xray_binary_path" ]]; then
+        echo -e " ${red}●${none} 未安装"
+        return
     fi
+    
+    local status_icon
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        status_icon="${green}●${none}"
+    else
+        status_icon="${red}●${none}"
+    fi
+    
+    echo -e " $status_icon Xray $(systemctl is-active xray 2>/dev/null || echo "inactive")"
+}
 
-    vless_json="$(jq -n \
-      --argjson port "${VLESS_PORT}" \
-      --arg uuid "${VLESS_UUID}" \
-      --arg dest "${REALITY_DEST}" \
-      --arg privateKey "${REALITY_PRIVATE_KEY}" \
-      --arg shortId "${REALITY_SHORT_ID}" \
-      --argjson serverNames "${servernames_json}" \
-      '{
-        tag: "vless-reality-in",
-        listen: "0.0.0.0",
-        port: $port,
-        protocol: "vless",
-        settings: {
-          clients: [
-            {
-              id: $uuid,
-              flow: "xtls-rprx-vision",
-              email: "main@local"
-            }
-          ],
-          decryption: "none"
-        },
-        streamSettings: {
-          network: "tcp",
-          security: "reality",
-          realitySettings: {
-            show: false,
-            dest: $dest,
-            xver: 0,
-            serverNames: $serverNames,
-            privateKey: $privateKey,
-            shortIds: [$shortId]
+# --- 核心配置生成函数 ---
+generate_ss_key() {
+    openssl rand -base64 16
+}
+
+build_vless_inbound() {
+    local port="$1" uuid="$2" domain="$3" private_key="$4" public_key="$5" shortid
+    shortid=$(generate_shortid)
+    jq -n --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg private_key "$private_key" --arg public_key "$public_key" --arg shortid "$shortid" \
+    '{ "listen": "0.0.0.0", "port": $port, "protocol": "vless", "settings": {"clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}], "decryption": "none"}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"show": false, "dest": ($domain + ":443"), "xver": 0, "serverNames": [$domain], "privateKey": $private_key, "publicKey": $public_key, "shortIds": [$shortid]}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]} }'
+}
+
+build_ss_inbound() {
+    local port="$1" password="$2"
+    jq -n --argjson port "$port" --arg password "$password" \
+    '{ "listen": "0.0.0.0", "port": $port, "protocol": "shadowsocks", "settings": {"method": "2022-blake3-aes-128-gcm", "password": $password} }'
+}
+
+write_config() {
+    local inbounds_json="$1"
+    local config_content
+    
+    config_content=$(jq -n --argjson inbounds "$inbounds_json" \
+    '{
+      "log": {"loglevel": "warning"},
+      "inbounds": $inbounds,
+      "outbounds": [
+        {
+          "protocol": "freedom",
+          "settings": {
+            "domainStrategy": "UseIPv4v6"
           }
-        },
-        sniffing: {
-          enabled: true,
-          destOverride: ["http", "tls", "quic"]
         }
-      }')"
-  fi
-
-  if (( ENABLE_SS == 1 )); then
-    ss_json="$(jq -n \
-      --argjson port "${SS_PORT}" \
-      --arg password "${SS_PASSWORD_B64}" \
-      '{
-        tag: "ss2022-in",
-        listen: "0.0.0.0",
-        port: $port,
-        protocol: "shadowsocks",
-        settings: {
-          method: "2022-blake3-aes-256-gcm",
-          password: $password,
-          network: "tcp,udp"
-        }
-      }')"
-  fi
-
-  jq -n \
-    --arg logDir "${LOG_DIR}" \
-    --argjson vless "${vless_json}" \
-    --argjson ss "${ss_json}" \
-    '{
-      log: {
-        loglevel: "warning",
-        access: ($logDir + "/access.log"),
-        error: ($logDir + "/error.log")
-      },
-      inbounds: [],
-      outbounds: [
-        { protocol: "freedom", tag: "direct" },
-        { protocol: "blackhole", tag: "block" }
       ]
-    }
-    | .inbounds += (if $vless == null then [] else [$vless] end)
-    | .inbounds += (if $ss == null then [] else [$ss] end)
-    ' > "${XRAY_DIR}/config.json"
-
-  if [[ ! -s "${XRAY_DIR}/config.json" ]]; then
-    echo "Failed to generate ${XRAY_DIR}/config.json"
-    exit 1
-  fi
-  chmod 600 "${XRAY_DIR}/config.json"
-}
-
-configure_firewall() {
-  echo "Skipping firewall configuration (UFW/iptables disabled by design)."
-}
-
-write_systemd_override() {
-  mkdir -p /etc/systemd/system/xray.service.d
-  cat >/etc/systemd/system/xray.service.d/override.conf <<'EOF'
-[Service]
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-RestrictNamespaces=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
-SystemCallArchitectures=native
-EOF
-}
-
-write_logrotate() {
-  cat >/etc/logrotate.d/xray <<EOF
-${LOG_DIR}/*.log {
-  daily
-  rotate 7
-  compress
-  missingok
-  notifempty
-  copytruncate
-}
-EOF
-}
-
-check_installation_health() {
-  local failed=0
-
-  echo
-  echo "Running installation checks..."
-
-  if /usr/local/bin/xray -test -config "${XRAY_DIR}/config.json" >/dev/null 2>&1; then
-    echo "[OK] Xray config test passed."
-  else
-    echo "[FAIL] Xray config test failed."
-    failed=1
-  fi
-
-  systemctl daemon-reload
-  systemctl enable xray >/dev/null 2>&1 || true
-  systemctl restart xray
-  sleep 1
-
-  if [[ "$(systemctl is-active xray 2>/dev/null || true)" == "active" ]]; then
-    echo "[OK] xray service is active."
-  else
-    echo "[FAIL] xray service is not active."
-    failed=1
-  fi
-
-  if (( ENABLE_VLESS == 1 )); then
-    if is_listening_tcp "${VLESS_PORT}"; then
-      echo "[OK] VLESS TCP port ${VLESS_PORT} is listening."
+    }')
+    
+    # 新增：验证生成的JSON是否有效
+    if ! echo "$config_content" | jq . >/dev/null 2>&1; then
+        error "生成的配置文件格式错误！"
+        return 1
+    fi
+    
+    echo "$config_content" > "$xray_config_path"
+    
+    # 修复：配置文件仅 root 可写，xray 所在组可读
+    if getent group nogroup >/dev/null 2>&1; then
+        chown root:nogroup "$xray_config_path"
+        chmod 640 "$xray_config_path"
     else
-      echo "[FAIL] VLESS TCP port ${VLESS_PORT} is not listening."
-      failed=1
+        chown root:root "$xray_config_path"
+        chmod 600 "$xray_config_path"
     fi
-  fi
+}
 
-  if (( ENABLE_SS == 1 )); then
-    if is_listening_tcp "${SS_PORT}"; then
-      echo "[OK] SS2022 TCP port ${SS_PORT} is listening."
+execute_official_script() {
+    local args="$1"
+    local tmp_script
+    tmp_script=$(mktemp)
+
+    if ! download_verified_official_script "$tmp_script"; then
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    if [[ "$args" = "remove" ]]; then
+        bash "$tmp_script" remove &> /dev/null &
+    elif [[ "$args" = "install-geodata" ]]; then
+        bash "$tmp_script" install-geodata &> /dev/null &
     else
-      echo "[FAIL] SS2022 TCP port ${SS_PORT} is not listening."
-      failed=1
+        bash "$tmp_script" install &> /dev/null &
     fi
-    if is_listening_udp "${SS_PORT}"; then
-      echo "[OK] SS2022 UDP port ${SS_PORT} is listening."
+
+    spinner $!
+    if ! wait $!; then
+        rm -f "$tmp_script"
+        return 1
+    fi
+    rm -f "$tmp_script"
+}
+
+run_core_install() {
+    info "正在下载并安装 Xray 核心..."
+    if ! execute_official_script "install"; then
+        error "Xray 核心安装失败！"
+        return 1
+    fi
+    
+    info "正在更新 GeoIP 和 GeoSite 数据文件..."
+    if ! execute_official_script "install-geodata"; then
+        error "Geo-data 更新失败！"
+        info "这通常不影响核心功能，您可以稍后手动更新。"
+    fi
+    
+    success "Xray 核心及数据文件已准备就绪。"
+}
+
+# --- 输入验证与交互函数 (优化) ---
+is_valid_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+# 新增：端口可用性检测
+is_port_available() {
+    local port="$1"
+    is_valid_port "$port" || return 1
+    
+    # 检查端口是否被占用
+    if ss -tlpn 2>/dev/null | grep -q ":$port "; then
+        warning "端口 $port 已被占用，建议选择其他端口"
+        return 1
+    fi
+    return 0
+}
+
+is_valid_domain() {
+    local domain="$1"
+    [[ "$domain" =~ ^[a-zA-Z0-9-]{1,63}(\.[a-zA-Z0-9-]{1,63})+$ ]] && [[ "$domain" != *--* ]]
+}
+
+prompt_for_vless_config() {
+    local -n p_port="$1" p_uuid="$2" p_sni="$3"
+    local default_port="${4:-443}"
+
+    while true; do
+        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
+        [[ -z "$p_port" ]] && p_port="$default_port"
+        if is_port_available "$p_port"; then break; fi
+    done
+    info "VLESS 端口将使用: ${cyan}${p_port}${none}"
+
+    read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" p_uuid || true
+    if [[ -z "$p_uuid" ]]; then
+        p_uuid=$(cat /proc/sys/kernel/random/uuid)
+        info "已为您生成随机UUID: ${cyan}${p_uuid}${none}"
+    fi
+
+    while true; do
+        read -p "$(echo -e " -> 请输入SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" p_sni || true
+        [[ -z "$p_sni" ]] && p_sni="learn.microsoft.com"
+        if is_valid_domain "$p_sni"; then break; else error "域名格式无效，请重新输入。"; fi
+    done
+    info "SNI 域名将使用: ${cyan}${p_sni}${none}"
+}
+
+prompt_for_ss_config() {
+    local -n p_port="$1" p_pass="$2"
+    local default_port="${3:-8388}"
+
+    while true; do
+        read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
+        [[ -z "$p_port" ]] && p_port="$default_port"
+        if is_port_available "$p_port"; then break; fi
+    done
+    info "Shadowsocks 端口将使用: ${cyan}${p_port}${none}"
+    
+    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" p_pass || true
+    if [[ -z "$p_pass" ]]; then
+        p_pass=$(generate_ss_key)
+        # 修改：完整显示SS密钥
+        info "已为您生成随机密钥: ${cyan}${p_pass}${none}"
+    fi
+}
+
+# --- 菜单功能函数 ---
+draw_divider() {
+    printf "%0.s─" {1..48}
+    printf "\n"
+}
+
+draw_menu_header() {
+    clear
+    echo -e "${cyan} Xray VLESS-Reality & Shadowsocks-2022 管理脚本${none}"
+    echo -e "${yellow} Version: ${SCRIPT_VERSION}${none}"
+    draw_divider
+    check_xray_status
+    echo -e "${xray_status_info}"
+    quick_status  # 新增快速状态显示
+    draw_divider
+}
+
+press_any_key_to_continue() {
+    echo ""
+    read -n 1 -s -r -p " 按任意键返回主菜单..." || true
+}
+
+install_menu() {
+    local vless_exists="" ss_exists=""
+    if [[ -f "$xray_config_path" ]]; then
+        vless_exists=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
+        ss_exists=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null || true)
+    fi
+    
+    draw_menu_header
+    if [[ -n "$vless_exists" && -n "$ss_exists" ]]; then
+        success "您已安装 VLESS-Reality + Shadowsocks-2022 双协议。"
+        info "如需修改，请使用主菜单的"修改配置"选项。\n 如需重装，请先"卸载"后，再重新"安装"。"
+        return
+    elif [[ -n "$vless_exists" && -z "$ss_exists" ]]; then
+        info "检测到您已安装 VLESS-Reality"
+        echo -e "${cyan} 请选择下一步操作${none}"
+        draw_divider
+        printf "  ${green}%-2s${none} %-35s\n" "1." "追加安装 Shadowsocks-2022 (组成双协议)"
+        printf "  ${red}%-2s${none} %-35s\n" "2." "覆盖重装 VLESS-Reality"
+        draw_divider
+        printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
+        draw_divider
+        read -p " 请输入选项 [0-2]: " choice || true
+        case "$choice" in 1) add_ss_to_vless ;; 2) install_vless_only ;; 0) return ;; *) error "无效选项。" ;; esac
+    elif [[ -z "$vless_exists" && -n "$ss_exists" ]]; then
+        info "检测到您已安装 Shadowsocks-2022"
+        echo -e "${cyan} 请选择下一步操作${none}"
+        draw_divider
+        printf "  ${green}%-2s${none} %-35s\n" "1." "追加安装 VLESS-Reality (组成双协议)"
+        printf "  ${red}%-2s${none} %-35s\n" "2." "覆盖重装 Shadowsocks-2022"
+        draw_divider
+        printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
+        draw_divider
+        read -p " 请输入选项 [0-2]: " choice || true
+        case "$choice" in 1) add_vless_to_ss ;; 2) install_ss_only ;; 0) return ;; *) error "无效选项。" ;; esac
     else
-      echo "[FAIL] SS2022 UDP port ${SS_PORT} is not listening."
-      failed=1
+        clean_install_menu
     fi
-  fi
-
-  return "${failed}"
 }
 
-urlencode() {
-  python3 - <<'PY' "$1"
-import sys, urllib.parse
-print(urllib.parse.quote(sys.argv[1], safe=''))
-PY
+clean_install_menu() {
+    draw_menu_header
+    echo -e "${cyan} 请选择要安装的协议类型${none}"
+    draw_divider
+    printf "  ${green}%-2s${none} %-35s\n" "1." "仅 VLESS-Reality"
+    printf "  ${cyan}%-2s${none} %-35s\n" "2." "仅 Shadowsocks-2022"
+    printf "  ${yellow}%-2s${none} %-35s\n" "3." "VLESS-Reality + Shadowsocks-2022 (双协议)"
+    draw_divider
+    printf "  ${magenta}%-2s${none} %-35s\n" "0." "返回主菜单"
+    draw_divider
+    read -p " 请输入选项 [0-3]: " choice || true
+    case "$choice" in 1) install_vless_only ;; 2) install_ss_only ;; 3) install_dual ;; 0) return ;; *) error "无效选项。" ;; esac
 }
 
-build_share_links() {
-  local server_ip=""
-  local server_host_url=""
-  local sni_first=""
-  local vless_name=""
-  local ss_name=""
-  local vless_name_enc=""
-  local ss_name_enc=""
-  local vless_link=""
-  local ss_link=""
-  local ss_userinfo_b64=""
-
-  server_ip="${SHARE_HOST}"
-  if [[ -z "${server_ip}" ]]; then
-    server_ip="$(detect_share_host)"
-  fi
-  if [[ -z "${server_ip}" ]]; then
-    echo "Failed to detect client connect host/IP."
-    exit 1
-  fi
-  server_host_url="$(format_host_for_url "${server_ip}")"
-
-  : > "${OUT_DIR}/links.txt"
-
-  {
-    echo "GeneratedAt: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    echo "ServerHost: ${server_ip}"
-    echo
-  } >> "${OUT_DIR}/links.txt"
-
-  if (( ENABLE_VLESS == 1 )); then
-    sni_first="$(echo "${REALITY_SERVERNAMES}" | cut -d',' -f1 | xargs)"
-    vless_name="vless-reality-${server_ip}"
-    vless_name_enc="$(urlencode "${vless_name}")"
-    vless_link="vless://${VLESS_UUID}@${server_host_url}:${VLESS_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni_first}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&headerType=none#${vless_name_enc}"
-
-    {
-      echo "VLESS:"
-      echo "${vless_link}"
-      echo
-    } >> "${OUT_DIR}/links.txt"
-  fi
-
-  if (( ENABLE_SS == 1 )); then
-    ss_name="ss2022-${server_ip}"
-    ss_name_enc="$(urlencode "${ss_name}")"
-    ss_userinfo_b64="$(printf '%s' "2022-blake3-aes-256-gcm:${SS_PASSWORD_B64}" | base64 -w 0)"
-    ss_link="ss://${ss_userinfo_b64}@${server_host_url}:${SS_PORT}#${ss_name_enc}"
-
-    {
-      echo "SS2022:"
-      echo "${ss_link}"
-      echo
-    } >> "${OUT_DIR}/links.txt"
-  fi
-
-  chmod 600 "${OUT_DIR}/links.txt"
-
-  echo
-  echo "Share links saved: ${OUT_DIR}/links.txt"
-  echo "Client connect host/IP: ${server_ip}"
-
-  if (( PRINT_LINKS_ON_SCREEN == 1 )); then
-    if (( ENABLE_VLESS == 1 )); then
-      echo
-      echo "---------- VLESS LINK ----------"
-      echo "${vless_link}"
+add_ss_to_vless() {
+    info "开始追加安装 Shadowsocks-2022..."
+    if [[ -z "$(get_public_ip)" ]]; then
+        error "无法获取公网 IP 地址，操作中止。请检查您的网络连接。"
+        return 1
     fi
-    if (( ENABLE_SS == 1 )); then
-      echo
-      echo "---------- SS2022 LINK ---------"
-      echo "${ss_link}"
+    local vless_inbound vless_port default_ss_port ss_port ss_password ss_inbound
+    vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
+    vless_port=$(echo "$vless_inbound" | jq -r '.port')
+    default_ss_port=$([[ "$vless_port" == "443" ]] && echo "8388" || echo "$((vless_port + 1))")
+    
+    prompt_for_ss_config ss_port ss_password "$default_ss_port"
+
+    ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password")
+    write_config "[$vless_inbound, $ss_inbound]"
+    
+    if ! restart_xray; then return 1; fi
+    
+    success "追加安装成功！"
+    view_all_info
+}
+
+add_vless_to_ss() {
+    info "开始追加安装 VLESS-Reality..."
+    if [[ -z "$(get_public_ip)" ]]; then
+        error "无法获取公网 IP 地址，操作中止。请检查您的网络连接。"
+        return 1
     fi
-  else
-    echo "Full links are hidden in terminal for security."
-    echo "Use this command if needed: cat ${OUT_DIR}/links.txt"
-  fi
+    local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain key_pair private_key public_key vless_inbound
+    ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
+    ss_port=$(echo "$ss_inbound" | jq -r '.port')
+    default_vless_port=$([[ "$ss_port" == "8388" ]] && echo "443" || echo "$((ss_port - 1))")
+
+    prompt_for_vless_config vless_port vless_uuid vless_domain "$default_vless_port"
+
+    info "正在生成 Reality 密钥对..."
+    key_pair=$(generate_reality_keys || true)
+    private_key="${key_pair%%|*}"
+    public_key="${key_pair##*|}"
+
+    if [[ -z "$private_key" || -z "$public_key" ]]; then
+        error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
+        exit 1
+    fi
+    
+    vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key")
+    write_config "[$vless_inbound, $ss_inbound]"
+    
+    if ! restart_xray; then return 1; fi
+    
+    success "追加安装成功！"
+    view_all_info
 }
 
-save_meta() {
-  local vless_port_json="null"
-  local ss_port_json="null"
-  if [[ -n "${VLESS_PORT}" ]]; then
-    vless_port_json="${VLESS_PORT}"
-  fi
-  if [[ -n "${SS_PORT}" ]]; then
-    ss_port_json="${SS_PORT}"
-  fi
-
-  jq -n \
-    --arg updatedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-    --argjson enableVless "${ENABLE_VLESS}" \
-    --argjson enableSs "${ENABLE_SS}" \
-    --argjson vlessPort "${vless_port_json}" \
-    --argjson ssPort "${ss_port_json}" \
-    --arg realityServerNames "${REALITY_SERVERNAMES:-}" \
-    --arg realityDest "${REALITY_DEST:-}" \
-    '{
-      updated_at: $updatedAt,
-      enable_vless: $enableVless,
-      enable_ss: $enableSs,
-      vless_port: $vlessPort,
-      ss_port: $ssPort,
-      reality_servernames: $realityServerNames,
-      reality_dest: $realityDest
-    }' > "${META_FILE}"
-  chmod 600 "${META_FILE}"
+install_vless_only() {
+    info "开始配置 VLESS-Reality..."
+    local port uuid domain
+    prompt_for_vless_config port uuid domain
+    run_install_vless "$port" "$uuid" "$domain"
 }
 
-show_status() {
-  echo
-  echo "================ XRAY STATUS ================"
+install_ss_only() {
+    info "开始配置 Shadowsocks-2022..."
+    local port password
+    prompt_for_ss_config port password
+    run_install_ss "$port" "$password"
+}
 
-  if [[ -x /usr/local/bin/xray ]]; then
-    local ver_line
-    ver_line="$(/usr/local/bin/xray version 2>/dev/null | head -n 1 || true)"
-    echo "Binary: installed ${ver_line:+(${ver_line})}"
-  else
-    echo "Binary: not installed"
-  fi
-
-  echo "Service active: $(systemctl is-active xray 2>/dev/null || echo not-found)"
-  echo "Service enabled: $(systemctl is-enabled xray 2>/dev/null || echo not-found)"
-
-  if [[ -f "${XRAY_DIR}/config.json" ]]; then
-    if [[ -x /usr/local/bin/xray ]] && /usr/local/bin/xray -test -config "${XRAY_DIR}/config.json" >/dev/null 2>&1; then
-      echo "Config test: pass"
+install_dual() {
+    info "开始配置双协议 (VLESS-Reality + Shadowsocks-2022)..."
+    local vless_port vless_uuid vless_domain ss_port ss_password
+    prompt_for_vless_config vless_port vless_uuid vless_domain
+    
+    local default_ss_port
+    if [[ "$vless_port" == "443" ]]; then
+        default_ss_port=8388
     else
-      echo "Config test: fail"
+        default_ss_port=$((vless_port + 1))
     fi
+    
+    prompt_for_ss_config ss_port ss_password "$default_ss_port"
+    
+    run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password"
+}
 
-    echo "Inbounds:"
-    jq -r '.inbounds[]? | "- \(.tag) | \(.protocol) | port=\(.port)"' "${XRAY_DIR}/config.json"
+update_xray() {
+    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi
+    info "正在检查最新版本..."
+    local current_version latest_version
+    current_version=$("$xray_binary_path" version | head -n 1 | awk '{print $2}')
+    latest_version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name' | sed 's/v//' || echo "")
+    
+    if [[ -z "$latest_version" ]]; then error "获取最新版本号失败，请检查网络或稍后重试。" && return; fi
+    info "当前版本: ${cyan}${current_version}${none}，最新版本: ${cyan}${latest_version}${none}"
+    
+    if [[ "$current_version" == "$latest_version" ]]; then
+        success "您的 Xray 已是最新版本。" && return
+    fi
+    
+    info "发现新版本，开始更新..."
+    run_core_install
+    if ! restart_xray; then return 1; fi
+    success "Xray 更新成功！"
+}
 
-    while read -r protocol port; do
-      [[ -z "${protocol}" || -z "${port}" ]] && continue
-      local tcp_state="down"
-      local udp_state="n/a"
-      if is_listening_tcp "${port}"; then
-        tcp_state="ok"
-      fi
-      if [[ "${protocol}" == "shadowsocks" ]]; then
-        if is_listening_udp "${port}"; then
-          udp_state="ok"
+uninstall_xray() {
+    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi
+    read -p "$(echo -e "${yellow}您确定要卸载 Xray 吗？这将删除所有配置！[Y/n]: ${none}")" confirm || true
+    if [[ "$confirm" =~ ^[nN]$ ]]; then
+        info "操作已取消。"
+        return
+    fi
+    info "正在卸载 Xray..."
+    if ! execute_official_script "remove --purge"; then
+        error "Xray 卸载失败！"
+        return 1
+    fi
+    rm -f ~/xray_subscription_info.txt
+    success "Xray 已成功卸载。"
+}
+
+modify_config_menu() {
+    if [[ ! -f "$xray_config_path" ]]; then error "错误: Xray 未安装。" && return; fi
+    
+    local vless_exists="" ss_exists=""
+    vless_exists=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
+    ss_exists=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null || true)
+    
+    if [[ -n "$vless_exists" && -n "$ss_exists" ]]; then
+        draw_menu_header
+        echo -e "${cyan} 请选择要修改的协议配置${none}"
+        draw_divider
+        printf "  ${green}%-2s${none} %-35s\n" "1." "VLESS-Reality"
+        printf "  ${cyan}%-2s${none} %-35s\n" "2." "Shadowsocks-2022"
+        draw_divider
+        printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
+        draw_divider
+        read -p " 请输入选项 [0-2]: " choice || true
+        case "$choice" in 1) modify_vless_config ;; 2) modify_ss_config ;; 0) return ;; *) error "无效选项。" ;; esac
+    elif [[ -n "$vless_exists" ]]; then
+        modify_vless_config
+    elif [[ -n "$ss_exists" ]]; then
+        modify_ss_config
+    else
+        error "未找到可修改的协议配置。"
+    fi
+}
+
+modify_vless_config() {
+    info "开始修改 VLESS-Reality 配置..."
+    local vless_inbound current_port current_uuid current_domain private_key public_key port uuid domain new_vless_inbound ss_inbound new_inbounds
+    vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
+    current_port=$(echo "$vless_inbound" | jq -r '.port')
+    current_uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id')
+    current_domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
+    private_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.privateKey')
+    public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey')
+    
+    while true; do
+        read -p "$(echo -e " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): ")" port || true
+        [[ -z "$port" ]] && port=$current_port
+        if is_port_available "$port" || [[ "$port" == "$current_port" ]]; then break; fi
+    done
+
+    read -p "$(echo -e " -> 新UUID (当前: ${cyan}${current_uuid}${none}, 留空不改): ")" uuid || true
+    [[ -z "$uuid" ]] && uuid=$current_uuid
+    
+    while true; do
+        read -p "$(echo -e " -> 新SNI域名 (当前: ${cyan}${current_domain}${none}, 留空不改): ")" domain || true
+        [[ -z "$domain" ]] && domain=$current_domain
+        if is_valid_domain "$domain"; then break; else error "域名格式无效，请重新输入。"; fi
+    done
+    
+    new_vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key")
+    ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null || true)
+    new_inbounds="[$new_vless_inbound]"
+    [[ -n "$ss_inbound" ]] && new_inbounds="[$new_vless_inbound, $ss_inbound]"
+    
+    write_config "$new_inbounds"
+    if ! restart_xray; then return 1; fi
+
+    success "配置修改成功！"
+    view_all_info
+}
+
+modify_ss_config() {
+    info "开始修改 Shadowsocks-2022 配置..."
+    local ss_inbound current_port current_password port password new_ss_inbound vless_inbound new_inbounds
+    ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
+    current_port=$(echo "$ss_inbound" | jq -r '.port')
+    current_password=$(echo "$ss_inbound" | jq -r '.settings.password')
+    
+    while true; do
+        read -p "$(echo -e " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): ")" port || true
+        [[ -z "$port" ]] && port=$current_port
+        if is_port_available "$port" || [[ "$port" == "$current_port" ]]; then break; fi
+    done
+
+    # 修改：完整显示当前SS密钥
+    read -p "$(echo -e " -> 新密钥 (当前: ${cyan}${current_password}${none}, 留空不改): ")" password || true
+    [[ -z "$password" ]] && password=$current_password
+    
+    new_ss_inbound=$(build_ss_inbound "$port" "$password")
+    vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
+    new_inbounds="[$new_ss_inbound]"
+    [[ -n "$vless_inbound" ]] && new_inbounds="[$vless_inbound, $new_ss_inbound]"
+    
+    write_config "$new_inbounds"
+    if ! restart_xray; then return 1; fi
+
+    success "配置修改成功！"
+    view_all_info
+}
+
+restart_xray() {
+    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return 1; fi
+    
+    info "正在重启 Xray 服务..."
+    if ! systemctl restart xray; then
+        error "尝试重启 Xray 服务失败！"
+        # 新增：显示详细错误信息
+        echo -e "\n${yellow}错误详情:${none}"
+        systemctl status xray --no-pager -l | tail -5
+        return 1
+    fi
+    
+    # 等待时间稍微延长，确保服务完全启动
+    sleep 2
+    if systemctl is-active --quiet xray; then
+        success "Xray 服务已成功重启！"
+    else
+        error "服务启动失败，详细信息:"
+        systemctl status xray --no-pager -l | tail -5
+        return 1
+    fi
+}
+
+view_xray_log() {
+    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi
+    info "正在显示 Xray 实时日志... 按 Ctrl+C 退出。"
+    journalctl -u xray -f --no-pager
+}
+
+view_all_info() {
+    if [ ! -f "$xray_config_path" ]; then
+        [[ "$is_quiet" = true ]] && return
+        error "错误: 配置文件不存在。"
+        return
+    fi
+    
+    [[ "$is_quiet" = false ]] && clear && echo -e "${cyan} Xray 配置及订阅信息${none}" && draw_divider
+
+    local ip
+    ip=$(get_public_ip)
+    if [[ -z "$ip" ]]; then
+        [[ "$is_quiet" = false ]] && error "无法获取公网 IP 地址。"
+        return 1
+    fi
+    local host
+    host=$(hostname)
+    local links_array=()
+
+    local vless_inbound
+    vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
+    if [[ -n "$vless_inbound" ]]; then
+        local uuid port domain public_key shortid display_ip link_name_raw link_name_encoded vless_url
+        uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id')
+        port=$(echo "$vless_inbound" | jq -r '.port')
+        domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
+        public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey')
+        shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
+        
+        if [[ -z "$public_key" ]]; then
+            [[ "$is_quiet" = false ]] && error "VLESS配置不完整，可能已损坏。"
         else
-          udp_state="down"
+            display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"
+            link_name_raw="$host X-reality"
+            link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
+            vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
+            links_array+=("$vless_url")
+
+            if [[ "$is_quiet" = false ]]; then
+                echo -e "${green} [ VLESS-Reality 配置 ]${none}"
+                printf "    %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
+                printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
+                printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
+                printf "    %s: ${cyan}%s${none}\n" "UUID" "${uuid}"
+                printf "    %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
+                printf "    %s: ${cyan}%s${none}\n" "传输协议" "tcp"
+                printf "    %s: ${cyan}%s${none}\n" "安全类型" "reality"
+                printf "    %s: ${cyan}%s${none}\n" "SNI" "$domain"
+                printf "    %s: ${cyan}%s${none}\n" "指纹" "chrome"
+                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "${public_key}"
+                printf "    %s: ${cyan}%s${none}\n" "ShortId" "$shortid"
+            fi
         fi
-      fi
-      echo "  - port ${port}: tcp=${tcp_state}, udp=${udp_state}"
-    done < <(jq -r '.inbounds[]? | "\(.protocol) \(.port)"' "${XRAY_DIR}/config.json")
-  else
-    echo "Config: not found (${XRAY_DIR}/config.json)"
-  fi
+    fi
 
-  if [[ -f "${META_FILE}" ]]; then
-    echo "Last install profile:"
-    jq -r '"  updated_at=\(.updated_at), enable_vless=\(.enable_vless), enable_ss=\(.enable_ss), vless_port=\(.vless_port), ss_port=\(.ss_port)"' "${META_FILE}"
-  fi
+    local ss_inbound
+    ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null || true)
+    if [[ -n "$ss_inbound" ]]; then
+        local port method password link_name_raw user_info_base64 ss_url
+        port=$(echo "$ss_inbound" | jq -r '.port')
+        method=$(echo "$ss_inbound" | jq -r '.settings.method')
+        password=$(echo "$ss_inbound" | jq -r '.settings.password')
+        link_name_raw="$host X-ss2022"
+        user_info_base64=$(echo -n "${method}:${password}" | base64 -w 0)
+        ss_url="ss://${user_info_base64}@${ip}:${port}#${link_name_raw}"
+        links_array+=("$ss_url")
+        
+        if [[ "$is_quiet" = false ]]; then
+            echo ""
+            echo -e "${green} [ Shadowsocks-2022 配置 ]${none}"
+            printf "    %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
+            printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
+            printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
+            printf "    %s: ${cyan}%s${none}\n" "加密方式" "$method"
+            # 修改：完整显示SS密钥
+            printf "    %s: ${cyan}%s${none}\n" "密码" "${password}"
+        fi
+    fi
 
-  if [[ -f "${OUT_DIR}/links.txt" ]]; then
-    echo "Share links file: ${OUT_DIR}/links.txt"
-  else
-    echo "Share links file: not found"
-  fi
-
-  echo "============================================="
+    if [ ${#links_array[@]} -gt 0 ]; then
+        local subscription_file="$HOME/xray_subscription_info.txt"
+        if [[ "$is_quiet" = true ]]; then
+            printf "%s\n" "${links_array[@]}"
+        else
+            draw_divider
+            (umask 077 && printf "%s\n" "${links_array[@]}" > "$subscription_file")
+            chmod 600 "$subscription_file" 2>/dev/null || true
+            success "所有订阅链接已汇总保存到: ${subscription_file}"
+            
+            echo -e "\n${yellow} --- V2Ray / Clash 等客户端可直接导入以下链接 --- ${none}\n"
+            for link in "${links_array[@]}"; do
+                echo -e "${cyan}${link}${none}\n"
+            done
+            draw_divider
+        fi
+    elif [[ "$is_quiet" = false ]]; then
+        info "当前未安装任何协议，无订阅信息可显示。"
+    fi
 }
 
-run_uninstall() {
-  local confirm="n"
-  echo
-  echo "This will uninstall Xray and remove installer-generated files."
-  read -rp "Continue uninstall? [y/N]: " confirm
-  if [[ ! "${confirm}" =~ ^[Yy]$ ]]; then
-    echo "Uninstall cancelled."
-    return 0
-  fi
-
-  systemctl stop xray >/dev/null 2>&1 || true
-  systemctl disable xray >/dev/null 2>&1 || true
-
-  if command_exists curl; then
-    local installer_file=""
-    installer_file="$(mktemp)"
-    if download_verified_installer "${installer_file}"; then
-      set +e
-      if command_exists timeout; then
-        timeout 180 bash "${installer_file}" remove
-      else
-        bash "${installer_file}" remove
-      fi
-      set -e
+# --- 核心安装逻辑函数 ---
+run_install_vless() {
+    local port="$1" uuid="$2" domain="$3"
+    if [[ -z "$(get_public_ip)" ]]; then
+        error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
+        exit 1
     fi
-    rm -f "${installer_file}" || true
-  fi
+    run_core_install || exit 1
+    info "正在生成 Reality 密钥对..."
+    local key_pair private_key public_key vless_inbound
+    key_pair=$(generate_reality_keys || true)
+    private_key="${key_pair%%|*}"
+    public_key="${key_pair##*|}"
 
-  rm -f "${XRAY_DIR}/config.json" || true
-  rm -rf "${STATE_DIR}" "${OUT_DIR}" || true
-  rm -f /etc/logrotate.d/xray || true
-  rm -f /etc/systemd/system/xray.service.d/override.conf || true
-  rmdir /etc/systemd/system/xray.service.d >/dev/null 2>&1 || true
-  systemctl daemon-reload || true
+    if [[ -z "$private_key" || -z "$public_key" ]]; then
+        error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
+        exit 1
+    fi
 
-  echo "Uninstall complete."
-  show_status
+    vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key")
+    write_config "[$vless_inbound]"
+    
+    if ! restart_xray; then exit 1; fi
+
+    success "VLESS-Reality 安装成功！"
+    view_all_info
 }
 
-run_install() {
-  local confirm="y"
-
-  ENABLE_VLESS=0
-  ENABLE_SS=0
-  VLESS_PORT=""
-  SS_PORT=""
-  REALITY_SERVERNAMES=""
-  REALITY_DEST=""
-  SHARE_HOST=""
-  SELECTED_PORTS=()
-
-  prompt_install_profile
-
-  if (( ENABLE_VLESS == 1 )); then
-    prompt_service_port "VLESS+REALITY" VLESS_PORT
-    if [[ "${VLESS_PORT}" != "443" ]]; then
-      echo "Warning: VLESS+REALITY on non-443 port (${VLESS_PORT}) may be less stable across some networks."
-      echo "Recommended VLESS port: 443"
+run_install_ss() {
+    local port="$1" password="$2"
+    if [[ -z "$(get_public_ip)" ]]; then
+        error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
+        exit 1
     fi
-    prompt_vless_settings
-  fi
+    run_core_install || exit 1
+    local ss_inbound
+    ss_inbound=$(build_ss_inbound "$port" "$password")
+    write_config "[$ss_inbound]"
 
-  if (( ENABLE_SS == 1 )); then
-    prompt_service_port "SS2022" SS_PORT
-  fi
+    if ! restart_xray; then exit 1; fi
 
-  prompt_share_host
-  prompt_print_links_mode
-
-  echo
-  echo "Installation summary:"
-  if (( ENABLE_VLESS == 1 )); then
-    echo "- VLESS+REALITY: enabled on tcp/${VLESS_PORT}"
-    if [[ "${VLESS_PORT}" != "443" ]]; then
-      echo "- VLESS note: non-443 selected; 443 is recommended for stability"
-    fi
-    echo "- REALITY serverNames: ${REALITY_SERVERNAMES}"
-    echo "- REALITY dest: ${REALITY_DEST}"
-  else
-    echo "- VLESS+REALITY: disabled"
-  fi
-  if (( ENABLE_SS == 1 )); then
-    echo "- SS2022: enabled on tcp+udp/${SS_PORT}"
-  else
-    echo "- SS2022: disabled"
-  fi
-  if [[ -n "${SHARE_HOST}" ]]; then
-    echo "- Client connect host/IP: ${SHARE_HOST}"
-  else
-    echo "- Client connect host/IP: auto detect"
-  fi
-  if (( PRINT_LINKS_ON_SCREEN == 1 )); then
-    echo "- Print links in terminal: yes"
-  else
-    echo "- Print links in terminal: no (recommended)"
-  fi
-  read -rp "Proceed with install/reconfigure? [Y/n]: " confirm
-  confirm="${confirm:-Y}"
-  if [[ "${confirm}" =~ ^[Nn]$ ]]; then
-    echo "Install cancelled."
-    return 0
-  fi
-
-  require_apt
-  echo "[1/11] Installing prerequisites..."
-  install_prerequisites
-  echo "[2/11] Preparing work directories..."
-  prepare_paths
-  echo "[3/11] Writing placeholder config..."
-  ensure_placeholder_config
-  echo "[4/11] Installing official Xray..."
-  install_official_xray
-  echo "[5/11] Preparing work directories (post-install)..."
-  prepare_paths
-  echo "[6/11] Generating credentials..."
-  generate_credentials
-  echo "[7/11] Writing final Xray config..."
-  build_xray_config
-  echo "[8/11] Skipping firewall changes..."
-  configure_firewall
-  echo "[9/11] Applying systemd hardening and logrotate..."
-  write_systemd_override
-  write_logrotate
-  echo "[10/11] Saving install metadata and generating links..."
-  save_meta
-  build_share_links
-  echo "[11/11] Running health checks..."
-
-  if check_installation_health; then
-    echo
-    echo "Install checks passed."
-  else
-    echo
-    echo "Install checks found issues. Please inspect: systemctl status xray --no-pager"
-  fi
-
-  show_status
+    success "Shadowsocks-2022 安装成功！"
+    view_all_info
 }
 
-quick_status_banner() {
-  echo
-  if [[ -x /usr/local/bin/xray ]]; then
-    echo "Current server state: Xray installed, service=$(systemctl is-active xray 2>/dev/null || echo unknown)"
-    if [[ ! -f "${XRAY_DIR}/config.json" ]]; then
-      echo "Warning: ${XRAY_DIR}/config.json is missing. Choose [1] Install / Reinstall to recover."
+run_install_dual() {
+    local vless_port="$1" vless_uuid="$2" vless_domain="$3" ss_port="$4" ss_password="$5"
+    if [[ -z "$(get_public_ip)" ]]; then
+        error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
+        exit 1
     fi
-  else
-    echo "Current server state: Xray not installed"
-  fi
+    run_core_install || exit 1
+    info "正在生成 Reality 密钥对..."
+    local key_pair private_key public_key vless_inbound ss_inbound
+    key_pair=$(generate_reality_keys || true)
+    private_key="${key_pair%%|*}"
+    public_key="${key_pair##*|}"
+
+    if [[ -z "$private_key" || -z "$public_key" ]]; then
+        error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
+        exit 1
+    fi
+
+    vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key")
+    ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password")
+    write_config "[$vless_inbound, $ss_inbound]"
+    
+    if ! restart_xray; then exit 1; fi
+
+    success "双协议安装成功！"
+    view_all_info
 }
 
+# --- 主菜单与脚本入口 ---
 main_menu() {
-  local choice=""
-  print_header
-  quick_status_banner
-
-  while true; do
-    echo
-    echo "Choose action:"
-    echo "1) Install / Reinstall"
-    echo "2) Show status"
-    echo "3) Uninstall"
-    echo "4) Exit"
-    read -rp "Select [1-4]: " choice
-    case "${choice}" in
-      1) run_install ;;
-      2) show_status ;;
-      3) run_uninstall ;;
-      4)
-        echo "Bye."
-        exit 0
-        ;;
-      *)
-        echo "Invalid selection."
-        ;;
-    esac
-  done
+    while true; do
+        draw_menu_header
+        printf "  ${green}%-2s${none} %-35s\n" "1." "安装 Xray (VLESS/Shadowsocks)"
+        printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray"
+        printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"
+        draw_divider
+        printf "  ${yellow}%-2s${none} %-35s\n" "4." "修改配置"
+        printf "  ${cyan}%-2s${none} %-35s\n" "5." "重启 Xray"
+        printf "  ${magenta}%-2s${none} %-35s\n" "6." "查看 Xray 日志"
+        printf "  ${green}%-2s${none} %-35s\n" "7." "查看订阅信息"
+        draw_divider
+        printf "  ${yellow}%-2s${none} %-35s\n" "0." "退出脚本"
+        draw_divider
+        
+        read -p " 请输入选项 [0-7]: " choice || true
+        
+        local needs_pause=true
+        
+        case "$choice" in
+            1) install_menu ;;
+            2) update_xray ;;
+            3) uninstall_xray ;;
+            4) modify_config_menu ;;
+            5) restart_xray ;;
+            6) view_xray_log; needs_pause=false ;;
+            7) view_all_info ;;
+            0) success "感谢使用！"; exit 0 ;;
+            *) error "无效选项。请输入0到7之间的数字。" ;;
+        esac
+        
+        if [ "$needs_pause" = true ]; then
+            press_any_key_to_continue
+        fi
+    done
 }
 
-main_menu
+# --- 非交互式安装逻辑 ---
+non_interactive_usage() {
+    cat << 'EOF'
+
+非交互式安装用法:
+  ./$(basename "$0") install --type <vless|ss|dual> [选项...]
+
+  通用选项:
+    --type <type>      安装类型 (必须: vless, ss, dual)
+    --quiet            静默模式, <em>成功</em>后只输出订阅链接
+
+  VLESS 选项:
+    --vless-port <p>   VLESS 端口 (默认: 443)
+    --uuid <uuid>      UUID (默认: 随机生成)
+    --sni <domain>     SNI 域名 (默认: learn.microsoft.com)
+
+  Shadowsocks 选项:
+    --ss-port <p>      Shadowsocks 端口 (默认: 8388)
+    --ss-pass <pass>   Shadowsocks 密码 (默认: 随机生成)
+
+  示例:
+    # 安装 VLESS (使用默认值)
+    ./$(basename "$0") install --type vless
+
+    # 安静地安装双协议并指定 VLESS 端口和 UUID，并将链接保存到文件
+    ./$(basename "$0") install --type dual --vless-port 2053 --uuid 'your-uuid-here' --quiet > links.txt
+EOF
+}
+
+non_interactive_dispatcher() {
+    if [[ $# -eq 0 || "$1" != "install" ]]; then
+        main_menu
+        return
+    fi
+    shift
+
+    local type="" vless_port="" uuid="" sni="" ss_port="" ss_pass=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --type) type="$2"; shift 2 ;;
+            --vless-port) vless_port="$2"; shift 2 ;;
+            --uuid) uuid="$2"; shift 2 ;;
+            --sni) sni="$2"; shift 2 ;;
+            --ss-port) ss_port="$2"; shift 2 ;;
+            --ss-pass) ss_pass="$2"; shift 2 ;;
+            --quiet) is_quiet=true; shift ;;
+            *) error "未知参数: $1"; non_interactive_usage; exit 1 ;;
+        esac
+    done
+
+    case "$type" in
+        vless)
+            [[ -z "$vless_port" ]] && vless_port=443
+            [[ -z "$uuid" ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
+            [[ -z "$sni" ]] && sni="learn.microsoft.com"
+            if ! is_valid_port "$vless_port" || ! is_valid_domain "$sni"; then
+                error "VLESS 参数无效。请检查端口或SNI域名。" && non_interactive_usage && exit 1
+            fi
+            info "开始非交互式安装 VLESS..."
+            run_install_vless "$vless_port" "$uuid" "$sni"
+            ;;
+        ss)
+            [[ -z "$ss_port" ]] && ss_port=8388
+            [[ -z "$ss_pass" ]] && ss_pass=$(generate_ss_key)
+            if ! is_valid_port "$ss_port"; then
+                error "Shadowsocks 参数无效。请检查端口。" && non_interactive_usage && exit 1
+            fi
+            info "开始非交互式安装 Shadowsocks..."
+            run_install_ss "$ss_port" "$ss_pass"
+            ;;
+        dual)
+            [[ -z "$vless_port" ]] && vless_port=443
+            [[ -z "$uuid" ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
+            [[ -z "$sni" ]] && sni="learn.microsoft.com"
+            [[ -z "$ss_pass" ]] && ss_pass=$(generate_ss_key)
+            if [[ -z "$ss_port" ]]; then
+                if [[ "$vless_port" == "443" ]]; then ss_port=8388; else ss_port=$((vless_port + 1)); fi
+            fi
+            if ! is_valid_port "$vless_port" || ! is_valid_domain "$sni" || ! is_valid_port "$ss_port"; then
+                error "双协议参数无效。请检查端口或SNI域名。" && non_interactive_usage && exit 1
+            fi
+            info "开始非交互式安装双协议..."
+            run_install_dual "$vless_port" "$uuid" "$sni" "$ss_port" "$ss_pass"
+            ;;
+        *)
+            error "必须通过 --type 指定安装类型 (vless|ss|dual)"
+            non_interactive_usage
+            exit 1
+            ;;
+    esac
+}
+
+# --- 脚本主入口 ---
+main() {
+    pre_check
+    non_interactive_dispatcher "$@"
+}
+
+main "$@"

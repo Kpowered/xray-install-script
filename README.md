@@ -1,62 +1,41 @@
-# Xray Installer
+# Xray Install Script
 
-Interactive hardened installer for:
-- VLESS + REALITY (TCP, `xtls-rprx-vision`)
-- Shadowsocks 2022 (`2022-blake3-aes-256-gcm`)
+Interactive script for:
+- VLESS + REALITY
+- Shadowsocks 2022
+- Dual-protocol installation and config management
 
 Script file: `xray-install.sh`
 
-## One-Click Usage (Public Repo)
+## One-Click
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Kpowered/xray-install-script/main/xray-install.sh)
+bash <(curl -fsSL "https://raw.githubusercontent.com/Kpowered/xray-install-script/main/xray-install.sh?ts=$(date +%s)")
 ```
 
-## What the Script Supports
+## Main Menu
 
-- Interactive menu:
-  - `Install / Reinstall`
-  - `Show status`
-  - `Uninstall`
-- Install mode choice:
-  - VLESS + REALITY only
-  - SS2022 only
-  - Both
-- Port choice during install:
-  - Random high port (`20000-59999`)
-  - Custom port
-- Simpler install flow:
-  - No SSH port prompt
-  - No UFW/iptables changes
-- REALITY target choice:
-  - Stable default (recommended): `www.cloudflare.com:443`
-  - Manual `serverNames` + `dest`
-- VLESS port hint:
-  - Non-`443` ports are allowed but warned as less stable on some networks
-- Post-install checks:
-  - `xray -test` config validation
-  - `systemctl is-active xray`
-  - Port listening checks (TCP/UDP)
-- Share output:
-  - Saves links file to `/root/xray-share/links.txt`
-  - Terminal printing of full links is optional (default: hidden for security)
-- Installer robustness:
-  - Writes a temporary minimal config before official install
-  - Continues setup even if official installer returns a warning
-- Security hardening:
-  - Pins official installer to a fixed upstream commit
-  - Verifies installer SHA256 before execution
-  - Sets `/usr/local/etc/xray/config.json` to `600`
-- Re-run status view:
-  - Service active/enabled
-  - Current inbound protocols and ports
-  - Last install profile
-  - Share links file location
+After running, the script provides:
+1. Install Xray (VLESS/Shadowsocks)
+2. Update Xray
+3. Uninstall Xray
+4. Modify config
+5. Restart Xray
+6. View Xray logs
+7. View subscription info
 
-## Clone and Run (Alternative)
+## Security Hardening Added
+
+- Official installer is pinned to a fixed `XTLS/Xray-install` commit.
+- SHA256 is verified before running the installer script.
+- Removed direct `curl | bash` execution path.
+- REALITY `shortId` is now random (not fixed).
+- REALITY key parsing supports current and legacy `xray x25519` outputs.
+- Config file permission is tightened (`640` root:nogroup or `600` root:root).
+- Subscription export file is written with strict permission (`600`).
+
+## Non-Interactive Example
 
 ```bash
-git clone https://github.com/Kpowered/xray-install-script.git
-cd xray-install-script
-sudo bash xray-install.sh
+sudo bash xray-install.sh install --type dual --vless-port 443 --ss-port 8388
 ```
