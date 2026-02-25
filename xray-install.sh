@@ -11,7 +11,7 @@ set -Eeuo pipefail
 # =========================================================
 
 INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
-SCRIPT_VERSION="2026-02-25.6"
+SCRIPT_VERSION="2026-02-25.7"
 
 XRAY_DIR="/usr/local/etc/xray"
 LOG_DIR="/var/log/xray"
@@ -33,6 +33,7 @@ REALITY_SHORT_ID=""
 REALITY_PRIVATE_KEY=""
 REALITY_PUBLIC_KEY=""
 SS_PASSWORD_B64=""
+SHARE_HOST=""
 SELECTED_PORTS=()
 
 on_error() {
@@ -84,6 +85,35 @@ random_hex_bytes() {
 random_b64_bytes() {
   local n="${1:-32}"
   head -c "${n}" /dev/urandom | base64 -w 0
+}
+
+format_host_for_url() {
+  local host="$1"
+  if [[ "${host}" == *:* && "${host}" != \[*\] ]]; then
+    echo "[${host}]"
+  else
+    echo "${host}"
+  fi
+}
+
+detect_share_host() {
+  local host=""
+
+  host="$(curl -4 -fsSL --max-time 6 https://api.ipify.org 2>/dev/null || true)"
+  if [[ -z "${host}" ]]; then
+    host="$(curl -4 -fsSL --max-time 6 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\n' || true)"
+  fi
+  if [[ -z "${host}" ]]; then
+    host="$(hostname -I | awk '{for(i=1;i<=NF;i++) if ($i !~ /:/) {print $i; exit}}')"
+  fi
+  if [[ -z "${host}" ]]; then
+    host="$(curl -6 -fsSL --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
+  fi
+  if [[ -z "${host}" ]]; then
+    host="$(hostname -I | awk '{print $1}')"
+  fi
+
+  echo "${host}"
 }
 
 is_valid_port() {
@@ -323,6 +353,10 @@ prompt_vless_settings() {
   done
 
   read -rp "Optional: restrict VLESS source CIDR (empty = any): " VLESS_ALLOW_CIDR
+}
+
+prompt_share_host() {
+  read -rp "Client connect host/IP (empty = auto detect public IPv4): " SHARE_HOST
 }
 
 install_prerequisites() {
@@ -711,6 +745,7 @@ PY
 
 build_share_links() {
   local server_ip=""
+  local server_host_url=""
   local sni_first=""
   local vless_name=""
   local ss_name=""
@@ -720,16 +755,21 @@ build_share_links() {
   local ss_link=""
   local ss_userinfo_b64=""
 
-  server_ip="$(curl -s https://api.ipify.org || true)"
+  server_ip="${SHARE_HOST}"
   if [[ -z "${server_ip}" ]]; then
-    server_ip="$(hostname -I | awk '{print $1}')"
+    server_ip="$(detect_share_host)"
   fi
+  if [[ -z "${server_ip}" ]]; then
+    echo "Failed to detect client connect host/IP."
+    exit 1
+  fi
+  server_host_url="$(format_host_for_url "${server_ip}")"
 
   : > "${OUT_DIR}/links.txt"
 
   {
     echo "GeneratedAt: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    echo "ServerIP: ${server_ip}"
+    echo "ServerHost: ${server_ip}"
     echo
   } >> "${OUT_DIR}/links.txt"
 
@@ -737,7 +777,7 @@ build_share_links() {
     sni_first="$(echo "${REALITY_SERVERNAMES}" | cut -d',' -f1 | xargs)"
     vless_name="vless-reality-${server_ip}"
     vless_name_enc="$(urlencode "${vless_name}")"
-    vless_link="vless://${VLESS_UUID}@${server_ip}:${VLESS_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni_first}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&headerType=none#${vless_name_enc}"
+    vless_link="vless://${VLESS_UUID}@${server_host_url}:${VLESS_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni_first}&fp=chrome&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&headerType=none#${vless_name_enc}"
 
     {
       echo "VLESS:"
@@ -752,7 +792,7 @@ build_share_links() {
     ss_name="ss2022-${server_ip}"
     ss_name_enc="$(urlencode "${ss_name}")"
     ss_userinfo_b64="$(printf '%s' "2022-blake3-aes-256-gcm:${SS_PASSWORD_B64}" | base64 -w 0)"
-    ss_link="ss://${ss_userinfo_b64}@${server_ip}:${SS_PORT}#${ss_name_enc}"
+    ss_link="ss://${ss_userinfo_b64}@${server_host_url}:${SS_PORT}#${ss_name_enc}"
 
     {
       echo "SS2022:"
@@ -773,6 +813,7 @@ build_share_links() {
   if (( ENABLE_SS == 1 )); then
     echo "QR PNG: ${OUT_DIR}/ss2022.png"
   fi
+  echo "Client connect host/IP: ${server_ip}"
 
   if (( ENABLE_VLESS == 1 )); then
     echo
@@ -923,6 +964,7 @@ run_install() {
   REALITY_SERVERNAMES=""
   REALITY_DEST=""
   VLESS_ALLOW_CIDR=""
+  SHARE_HOST=""
   SELECTED_PORTS=()
 
   prompt_install_profile
@@ -936,6 +978,8 @@ run_install() {
   if (( ENABLE_SS == 1 )); then
     prompt_service_port "SS2022" SS_PORT
   fi
+
+  prompt_share_host
 
   echo
   echo "Installation summary:"
@@ -951,6 +995,11 @@ run_install() {
     echo "- SS2022: enabled on tcp+udp/${SS_PORT}"
   else
     echo "- SS2022: disabled"
+  fi
+  if [[ -n "${SHARE_HOST}" ]]; then
+    echo "- Client connect host/IP: ${SHARE_HOST}"
+  else
+    echo "- Client connect host/IP: auto detect"
   fi
   read -rp "Proceed with install/reconfigure? [Y/n]: " confirm
   confirm="${confirm:-Y}"
