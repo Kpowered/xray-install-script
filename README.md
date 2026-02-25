@@ -29,8 +29,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Kpowered/xray-install-script
   - No SSH port prompt
   - No UFW/iptables changes
 - REALITY target choice:
-  - Auto random popular website (default)
+  - Stable default (recommended): `www.cloudflare.com:443`
   - Manual `serverNames` + `dest`
+- VLESS port hint:
+  - Non-`443` ports are allowed but warned as less stable on some networks
 - Post-install checks:
   - `xray -test` config validation
   - `systemctl is-active xray`

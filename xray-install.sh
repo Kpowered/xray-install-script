@@ -11,7 +11,7 @@ set -Eeuo pipefail
 # =========================================================
 
 INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
-SCRIPT_VERSION="2026-02-25.9"
+SCRIPT_VERSION="2026-02-25.10"
 
 XRAY_DIR="/usr/local/etc/xray"
 LOG_DIR="/var/log/xray"
@@ -266,43 +266,21 @@ prompt_install_profile() {
   done
 }
 
-pick_random_reality_site() {
-  local sites=(
-    "www.cloudflare.com"
-    "www.microsoft.com"
-    "www.apple.com"
-    "www.amazon.com"
-    "www.wikipedia.org"
-    "www.bing.com"
-    "www.github.com"
-    "www.adobe.com"
-  )
-  local idx=0
-  if command_exists shuf; then
-    idx="$(shuf -i 0-$((${#sites[@]} - 1)) -n 1)"
-  else
-    idx="$((RANDOM % ${#sites[@]}))"
-  fi
-  echo "${sites[idx]}"
-}
-
 prompt_vless_settings() {
   local mode=""
-  local auto_site=""
 
   while true; do
     echo
     echo "REALITY target mode:"
-    echo "1) Auto random popular website (recommended)"
+    echo "1) Use stable default (recommended): www.cloudflare.com:443"
     echo "2) Manual input"
     read -rp "Select [1/2] (default 1): " mode
     mode="${mode:-1}"
     case "${mode}" in
       1)
-        auto_site="$(pick_random_reality_site)"
-        REALITY_SERVERNAMES="${auto_site}"
-        REALITY_DEST="${auto_site}:443"
-        echo "Auto selected site: ${auto_site}"
+        REALITY_SERVERNAMES="www.cloudflare.com"
+        REALITY_DEST="www.cloudflare.com:443"
+        echo "Selected default target: ${REALITY_DEST}"
         break
         ;;
       2)
@@ -906,6 +884,10 @@ run_install() {
 
   if (( ENABLE_VLESS == 1 )); then
     prompt_service_port "VLESS+REALITY" VLESS_PORT
+    if [[ "${VLESS_PORT}" != "443" ]]; then
+      echo "Warning: VLESS+REALITY on non-443 port (${VLESS_PORT}) may be less stable across some networks."
+      echo "Recommended VLESS port: 443"
+    fi
     prompt_vless_settings
   fi
 
@@ -919,6 +901,9 @@ run_install() {
   echo "Installation summary:"
   if (( ENABLE_VLESS == 1 )); then
     echo "- VLESS+REALITY: enabled on tcp/${VLESS_PORT}"
+    if [[ "${VLESS_PORT}" != "443" ]]; then
+      echo "- VLESS note: non-443 selected; 443 is recommended for stability"
+    fi
     echo "- REALITY serverNames: ${REALITY_SERVERNAMES}"
     echo "- REALITY dest: ${REALITY_DEST}"
   else
