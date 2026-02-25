@@ -353,7 +353,7 @@ is_valid_domain() {
 
 prompt_for_vless_config() {
     local -n p_port="$1" p_uuid="$2" p_sni="$3"
-    local default_port="${4:-443}"
+    local default_port="${4:-19000}"
 
     while true; do
         read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
@@ -501,7 +501,7 @@ add_vless_to_ss() {
     local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain key_pair private_key public_key vless_inbound
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     ss_port=$(echo "$ss_inbound" | jq -r '.port')
-    default_vless_port=$([[ "$ss_port" == "8388" ]] && echo "443" || echo "$((ss_port - 1))")
+    default_vless_port=$([[ "$ss_port" == "8388" ]] && echo "19000" || echo "$((ss_port - 1))")
 
     prompt_for_vless_config vless_port vless_uuid vless_domain "$default_vless_port"
 
@@ -970,7 +970,7 @@ non_interactive_usage() {
     --quiet            静默模式, <em>成功</em>后只输出订阅链接
 
   VLESS 选项:
-    --vless-port <p>   VLESS 端口 (默认: 443)
+    --vless-port <p>   VLESS 端口 (默认: 19000)
     --uuid <uuid>      UUID (默认: 随机生成)
     --sni <domain>     SNI 域名 (默认: learn.microsoft.com)
 
@@ -1011,7 +1011,7 @@ non_interactive_dispatcher() {
 
     case "$type" in
         vless)
-            [[ -z "$vless_port" ]] && vless_port=443
+            [[ -z "$vless_port" ]] && vless_port=19000
             [[ -z "$uuid" ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
             [[ -z "$sni" ]] && sni="learn.microsoft.com"
             if ! is_valid_port "$vless_port" || ! is_valid_domain "$sni"; then
@@ -1030,7 +1030,7 @@ non_interactive_dispatcher() {
             run_install_ss "$ss_port" "$ss_pass"
             ;;
         dual)
-            [[ -z "$vless_port" ]] && vless_port=443
+            [[ -z "$vless_port" ]] && vless_port=19000
             [[ -z "$uuid" ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
             [[ -z "$sni" ]] && sni="learn.microsoft.com"
             [[ -z "$ss_pass" ]] && ss_pass=$(generate_ss_key)
