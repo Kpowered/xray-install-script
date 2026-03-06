@@ -18,6 +18,7 @@ set -euo pipefail
 readonly SCRIPT_VERSION="Final v2.9.2-secure.4"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
+readonly xray_service_path="/etc/systemd/system/xray.service"
 readonly xray_install_script_commit="e741a4f56d368afbb9e5be3361b40c4552d3710d"
 readonly xray_install_script_sha256="7F70C95F6B418DA8B4F4883343D602964915E28748993870FD554383AFDBE555"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/${xray_install_script_commit}/install-release.sh"
@@ -196,6 +197,25 @@ get_public_port() {
     esac
 }
 
+
+is_broken_xray_install() {
+    [[ -x "$xray_binary_path" ]] || return 1
+    [[ -f "$xray_service_path" ]] && return 1
+    systemctl show -p LoadState --value xray 2>/dev/null | grep -qv 'not-found' && return 1
+    return 0
+}
+
+repair_broken_xray_install() {
+    if ! is_broken_xray_install; then
+        return 0
+    fi
+
+    warning "检测到残缺的 Xray 安装状态，正在清理后重装..."
+    rm -f "$xray_binary_path"
+    rm -rf "$(dirname "$xray_config_path")"
+    rm -f "$xray_service_path" /etc/systemd/system/xray@.service
+    systemctl daemon-reload 2>/dev/null || true
+}
 # --- 预检查与环境设置 ---
 pre_check() {
     [[ "$(id -u)" != 0 ]] && error "错误: 您必须以root用户身份运行此脚本" && exit 1
@@ -287,6 +307,7 @@ write_config() {
         return 1
     fi
     
+    mkdir -p "$(dirname "$xray_config_path")"
     echo "$config_content" > "$xray_config_path"
     
     # 修复：配置文件仅 root 可写，xray 所在组可读
@@ -351,6 +372,7 @@ execute_official_script() {
 }
 
 run_core_install() {
+    repair_broken_xray_install || return 1
     info "正在下载并安装 Xray 核心..."
     if ! execute_official_script "install"; then
         error "Xray 核心安装失败！"
