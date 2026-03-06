@@ -29,6 +29,9 @@ readonly magenta='\e[95m' cyan='\e[96m' none='\e[0m'
 # --- 全局变量 ---
 xray_status_info=""
 is_quiet=false
+server_address_override=""
+vless_public_port_override=""
+ss_public_port_override=""
 
 # --- 辅助函数 ---
 error() { 
@@ -165,6 +168,31 @@ get_public_ip() {
             ip=$($cmd "$url" 2>/dev/null) && [[ -n "$ip" ]] && echo "$ip" && return
         done
     done
+}
+
+resolve_server_address() {
+    if [[ -n "$server_address_override" ]]; then
+        echo "$server_address_override"
+        return 0
+    fi
+    get_public_ip
+}
+
+get_public_port() {
+    local protocol="$1"
+    local local_port="$2"
+
+    case "$protocol" in
+        vless)
+            [[ -n "$vless_public_port_override" ]] && echo "$vless_public_port_override" || echo "$local_port"
+            ;;
+        ss)
+            [[ -n "$ss_public_port_override" ]] && echo "$ss_public_port_override" || echo "$local_port"
+            ;;
+        *)
+            echo "$local_port"
+            ;;
+    esac
 }
 
 # --- 预检查与环境设置 ---
@@ -348,7 +376,29 @@ is_port_available() {
 
 is_valid_domain() {
     local domain="$1"
-    [[ "$domain" =~ ^[a-zA-Z0-9-]{1,63}(\.[a-zA-Z0-9-]{1,63})+$ ]] && [[ "$domain" != *--* ]]
+    [[ "$domain" =~ ^[a-zA-Z0-9-]{1,63}(\.[a-zA-Z0-9-]{1,63})+$ ]]
+}
+
+is_valid_server_address() {
+    local address="$1"
+    [[ "$address" =~ ^[0-9A-Za-z.:-]+$ ]]
+}
+
+validate_public_endpoint_overrides() {
+    if [[ -n "$server_address_override" ]] && ! is_valid_server_address "$server_address_override"; then
+        error "外部服务器地址格式无效。"
+        exit 1
+    fi
+
+    if [[ -n "$vless_public_port_override" ]] && ! is_valid_port "$vless_public_port_override"; then
+        error "VLESS 外部端口无效。"
+        exit 1
+    fi
+
+    if [[ -n "$ss_public_port_override" ]] && ! is_valid_port "$ss_public_port_override"; then
+        error "Shadowsocks 外部端口无效。"
+        exit 1
+    fi
 }
 
 prompt_for_vless_config() {
@@ -472,10 +522,6 @@ clean_install_menu() {
 
 add_ss_to_vless() {
     info "开始追加安装 Shadowsocks-2022..."
-    if [[ -z "$(get_public_ip)" ]]; then
-        error "无法获取公网 IP 地址，操作中止。请检查您的网络连接。"
-        return 1
-    fi
     local vless_inbound vless_port default_ss_port ss_port ss_password ss_inbound
     vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     vless_port=$(echo "$vless_inbound" | jq -r '.port')
@@ -494,10 +540,6 @@ add_ss_to_vless() {
 
 add_vless_to_ss() {
     info "开始追加安装 VLESS-Reality..."
-    if [[ -z "$(get_public_ip)" ]]; then
-        error "无法获取公网 IP 地址，操作中止。请检查您的网络连接。"
-        return 1
-    fi
     local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain key_pair private_key public_key vless_inbound
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     ss_port=$(echo "$ss_inbound" | jq -r '.port')
@@ -757,10 +799,9 @@ view_all_info() {
     [[ "$is_quiet" = false ]] && clear && echo -e "${cyan} Xray 配置及订阅信息${none}" && draw_divider
 
     local ip
-    ip=$(get_public_ip)
+    ip=$(resolve_server_address || true)
     if [[ -z "$ip" ]]; then
-        [[ "$is_quiet" = false ]] && error "无法获取公网 IP 地址。"
-        return 1
+        [[ "$is_quiet" = false ]] && warning "无法自动获取外部连接地址；如为 NAT/端口映射环境，请使用 --server-address 和公开端口参数。"
     fi
     local host
     host=$(hostname)
@@ -769,9 +810,10 @@ view_all_info() {
     local vless_inbound
     vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
     if [[ -n "$vless_inbound" ]]; then
-        local uuid port domain public_key shortid display_ip link_name_raw link_name_encoded vless_url
+        local uuid port public_port domain public_key shortid display_ip link_name_raw link_name_encoded vless_url
         uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id')
         port=$(echo "$vless_inbound" | jq -r '.port')
+        public_port=$(get_public_port "vless" "$port")
         domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
         public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey')
         shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
@@ -779,17 +821,20 @@ view_all_info() {
         if [[ -z "$public_key" ]]; then
             [[ "$is_quiet" = false ]] && error "VLESS配置不完整，可能已损坏。"
         else
-            display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"
+            display_ip=$ip && [[ $ip =~ ":" ]] && [[ $ip != *"."* ]] && display_ip="[$ip]"
             link_name_raw="$host X-reality"
             link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
-            vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
-            links_array+=("$vless_url")
+            if [[ -n "$display_ip" ]]; then
+                vless_url="vless://${uuid}@${display_ip}:${public_port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
+                links_array+=("$vless_url")
+            fi
 
             if [[ "$is_quiet" = false ]]; then
                 echo -e "${green} [ VLESS-Reality 配置 ]${none}"
                 printf "    %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
-                printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-                printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
+                printf "    %s: ${cyan}%s${none}\n" "服务器地址" "${ip:-未设置}"
+                printf "    %s: ${cyan}%s${none}\n" "本地监听端口" "$port"
+                printf "    %s: ${cyan}%s${none}\n" "外部访问端口" "$public_port"
                 printf "    %s: ${cyan}%s${none}\n" "UUID" "${uuid}"
                 printf "    %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
                 printf "    %s: ${cyan}%s${none}\n" "传输协议" "tcp"
@@ -805,21 +850,25 @@ view_all_info() {
     local ss_inbound
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null || true)
     if [[ -n "$ss_inbound" ]]; then
-        local port method password link_name_raw user_info_base64 ss_url
+        local port public_port method password link_name_raw user_info_base64 ss_url
         port=$(echo "$ss_inbound" | jq -r '.port')
+        public_port=$(get_public_port "ss" "$port")
         method=$(echo "$ss_inbound" | jq -r '.settings.method')
         password=$(echo "$ss_inbound" | jq -r '.settings.password')
         link_name_raw="$host X-ss2022"
-        user_info_base64=$(echo -n "${method}:${password}" | base64 -w 0)
-        ss_url="ss://${user_info_base64}@${ip}:${port}#${link_name_raw}"
-        links_array+=("$ss_url")
+        user_info_base64=$(printf "%s" "${method}:${password}" | base64 | tr -d '\r\n')
+        if [[ -n "$ip" ]]; then
+            ss_url="ss://${user_info_base64}@${ip}:${public_port}#${link_name_raw}"
+            links_array+=("$ss_url")
+        fi
         
         if [[ "$is_quiet" = false ]]; then
             echo ""
             echo -e "${green} [ Shadowsocks-2022 配置 ]${none}"
             printf "    %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
-            printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-            printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
+            printf "    %s: ${cyan}%s${none}\n" "服务器地址" "${ip:-未设置}"
+            printf "    %s: ${cyan}%s${none}\n" "本地监听端口" "$port"
+            printf "    %s: ${cyan}%s${none}\n" "外部访问端口" "$public_port"
             printf "    %s: ${cyan}%s${none}\n" "加密方式" "$method"
             # 修改：完整显示SS密钥
             printf "    %s: ${cyan}%s${none}\n" "密码" "${password}"
@@ -842,18 +891,16 @@ view_all_info() {
             done
             draw_divider
         fi
-    elif [[ "$is_quiet" = false ]]; then
+    elif [[ "$is_quiet" = false && -n "$ip" ]]; then
         info "当前未安装任何协议，无订阅信息可显示。"
+    elif [[ "$is_quiet" = false ]]; then
+        warning "已完成配置，但未生成订阅链接；请手动设置外部地址后重新查看订阅信息。"
     fi
 }
 
 # --- 核心安装逻辑函数 ---
 run_install_vless() {
     local port="$1" uuid="$2" domain="$3"
-    if [[ -z "$(get_public_ip)" ]]; then
-        error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
-        exit 1
-    fi
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound
@@ -877,10 +924,6 @@ run_install_vless() {
 
 run_install_ss() {
     local port="$1" password="$2"
-    if [[ -z "$(get_public_ip)" ]]; then
-        error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
-        exit 1
-    fi
     run_core_install || exit 1
     local ss_inbound
     ss_inbound=$(build_ss_inbound "$port" "$password")
@@ -894,10 +937,6 @@ run_install_ss() {
 
 run_install_dual() {
     local vless_port="$1" vless_uuid="$2" vless_domain="$3" ss_port="$4" ss_password="$5"
-    if [[ -z "$(get_public_ip)" ]]; then
-        error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
-        exit 1
-    fi
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound ss_inbound
@@ -968,6 +1007,9 @@ non_interactive_usage() {
   通用选项:
     --type <type>      安装类型 (必须: vless, ss, dual)
     --quiet            静默模式, <em>成功</em>后只输出订阅链接
+    --server-address   指定客户端连接用的外部地址 (NAT/端口映射时推荐)
+    --vless-public-port <p>  指定 VLESS 外部访问端口
+    --ss-public-port <p>     指定 Shadowsocks 外部访问端口
 
   VLESS 选项:
     --vless-port <p>   VLESS 端口 (默认: 443)
@@ -1004,10 +1046,15 @@ non_interactive_dispatcher() {
             --sni) sni="$2"; shift 2 ;;
             --ss-port) ss_port="$2"; shift 2 ;;
             --ss-pass) ss_pass="$2"; shift 2 ;;
+            --server-address) server_address_override="$2"; shift 2 ;;
+            --vless-public-port) vless_public_port_override="$2"; shift 2 ;;
+            --ss-public-port) ss_public_port_override="$2"; shift 2 ;;
             --quiet) is_quiet=true; shift ;;
             *) error "未知参数: $1"; non_interactive_usage; exit 1 ;;
         esac
     done
+
+    validate_public_endpoint_overrides
 
     case "$type" in
         vless)
