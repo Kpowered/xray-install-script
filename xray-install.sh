@@ -2,8 +2,8 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.9.2
-# 更新日志 (v2.9.2):
+# 版本: Final v2.9.3
+# 更新日志 (v2.9.3):
 # - [安全] 添加配置文件权限保护
 # - [安全] 增强脚本下载验证
 # - [安全] 敏感信息显示保护
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.9.2-secure.4"
+readonly SCRIPT_VERSION="Final v2.9.3-secure.7"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_service_path="/etc/systemd/system/xray.service"

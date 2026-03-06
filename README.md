@@ -10,7 +10,7 @@ Script file: `xray-install.sh`
 ## One-Click
 
 ```bash
-bash <(curl -fsSL "https://raw.githubusercontent.com/Kpowered/xray-install-script/main/xray-install.sh?ts=$(date +%s)")
+bash <(curl -fsSL https://raw.githubusercontent.com/Kpowered/xray-install-script/main/xray-install.sh)
 ```
 
 ## Main Menu
