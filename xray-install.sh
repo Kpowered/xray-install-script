@@ -29,6 +29,7 @@ readonly magenta='\e[95m' cyan='\e[96m' none='\e[0m'
 # --- 全局变量 ---
 xray_status_info=""
 is_quiet=false
+debug_mode=false
 server_address_override=""
 vless_public_port_override=""
 ss_public_port_override=""
@@ -328,6 +329,16 @@ execute_official_script() {
             return 1
             ;;
     esac
+
+    if [[ "$debug_mode" = true ]]; then
+        info "[debug] 正在执行官方安装脚本: $args"
+        if ! bash "$tmp_script" "${cmd[@]}"; then
+            rm -f "$tmp_script"
+            return 1
+        fi
+        rm -f "$tmp_script"
+        return 0
+    fi
 
     bash "$tmp_script" "${cmd[@]}" &> /dev/null &
 
@@ -1007,6 +1018,7 @@ non_interactive_usage() {
   通用选项:
     --type <type>      安装类型 (必须: vless, ss, dual)
     --quiet            静默模式, <em>成功</em>后只输出订阅链接
+    --debug            调试模式，显示官方安装脚本输出
     --server-address   指定客户端连接用的外部地址 (NAT/端口映射时推荐)
     --vless-public-port <p>  指定 VLESS 外部访问端口
     --ss-public-port <p>     指定 Shadowsocks 外部访问端口
@@ -1049,6 +1061,7 @@ non_interactive_dispatcher() {
             --server-address) server_address_override="$2"; shift 2 ;;
             --vless-public-port) vless_public_port_override="$2"; shift 2 ;;
             --ss-public-port) ss_public_port_override="$2"; shift 2 ;;
+            --debug) debug_mode=true; shift ;;
             --quiet) is_quiet=true; shift ;;
             *) error "未知参数: $1"; non_interactive_usage; exit 1 ;;
         esac
