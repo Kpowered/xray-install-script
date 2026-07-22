@@ -2,7 +2,9 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2026.3.6
+# 版本: Final v2026.7.22
+# 更新日志 (v2026.7.22):
+# - [修复] 适配新版 xray x25519 输出格式，修复 Reality 公钥解析错误导致客户端无法连接
 # 更新日志 (v2.9.3):
 # - [安全] 添加配置文件权限保护
 # - [安全] 增强脚本下载验证
@@ -15,7 +17,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2026.3.6"
+readonly SCRIPT_VERSION="Final v2026.7.22"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_service_path="/etc/systemd/system/xray.service"
@@ -113,17 +115,12 @@ generate_reality_keys() {
     local key_pair private_key public_key
     key_pair=$("$xray_binary_path" x25519 2>/dev/null || true)
 
-    private_key=$(echo "$key_pair" | sed -nE 's/.*Private[[:space:]]*[Kk]ey:?[[:space:]]*([^[:space:]]+).*/\1/p' | head -n 1)
-    public_key=$(echo "$key_pair" | sed -nE 's/.*Public[[:space:]]*[Kk]ey:?[[:space:]]*([^[:space:]]+).*/\1/p' | head -n 1)
-
-    if [[ -z "$private_key" || -z "$public_key" ]]; then
-        private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}' | head -n 1)
-        public_key=$(echo "$key_pair" | awk '/PublicKey:/ {print $2}' | head -n 1)
-    fi
-
-    if [[ -z "$private_key" || -z "$public_key" ]]; then
-        public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}' | head -n 1)
-    fi
+    # 按行首标签精确取值，兼容新版 "PrivateKey: / Password (PublicKey):"、
+    # 旧版 "Private key: / Public key:" 及中间版本 "Password:" 输出格式
+    private_key=$(echo "$key_pair" | awk -F': +' 'tolower($1) ~ /^private ?key$/ {print $2; exit}')
+    public_key=$(echo "$key_pair" | awk -F': +' '$1 == "Password (PublicKey)" {print $2; exit}')
+    [[ -z "$public_key" ]] && public_key=$(echo "$key_pair" | awk -F': +' 'tolower($1) ~ /^public ?key$/ {print $2; exit}')
+    [[ -z "$public_key" ]] && public_key=$(echo "$key_pair" | awk -F': +' '$1 == "Password" {print $2; exit}')
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         return 1
